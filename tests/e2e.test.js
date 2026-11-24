@@ -191,9 +191,11 @@ async function step(name, fn) {
     await m.locator('#share-main .share-row:not(.share-head)').nth(2).locator('[data-f=target]').fill('Lab Mitra');
     await m.locator('#share-main .share-row:not(.share-head)').nth(2).locator('[data-f=mode]').selectOption('percent');
     await m.locator('#share-main .share-row:not(.share-head)').nth(2).locator('[data-f=value]').fill('10');
-    await page.waitForTimeout(300);
-    const prev = await m.locator('#share-preview').innerText();
-    assert.ok(/Rp26\.000/.test(prev) && /Rp4\.000/.test(prev) && /sesuai/.test(prev), prev);
+    assert.strictEqual(await m.locator('[name=price]').inputValue(), '40.000');
+    await page.waitForFunction(() => {
+      const t = document.querySelector('#share-preview').innerText;
+      return /Rp26\.000/.test(t) && /Rp4\.000/.test(t) && /sesuai/.test(t);
+    }, null, { timeout: 10000 }).catch(async () => assert.fail('Preview: ' + (await m.locator('#share-preview').innerText())));
     await modalBtn('Simpan Tindakan').click();
     await page.waitForSelector('.modal-backdrop', { state: 'detached' });
     const s = await ev(async () => (await NP.db.all('services')).find((x) => x.name === 'Tes Hemoglobin'));
@@ -207,8 +209,7 @@ async function step(name, fn) {
     const rows = m.locator('#share-main .share-row:not(.share-head)');
     await rows.nth(0).locator('[data-f=value]').fill('15000');
     await rows.nth(1).locator('[data-f=value]').fill('10000');
-    await page.waitForTimeout(250);
-    assert.ok(/melebihi/.test(await m.locator('#share-preview').innerText()));
+    await page.waitForFunction(() => /melebihi/.test(document.querySelector('#share-preview').innerText), null, { timeout: 10000 });
     await modalBtn('Simpan Tindakan').click();
     await page.waitForSelector('.svc-form .form-error:not([hidden])');
     await modalBtn('Batal').click();
@@ -511,7 +512,8 @@ async function step(name, fn) {
     await page.fill('[name=username]', 'viewer');
     await page.fill('[name=password]', 'viewer123');
     await page.click('.auth-card button[type=submit]');
-    await page.waitForSelector('.sidebar');
+    await page.waitForSelector('.sidebar, .auth-error:not([hidden])', { timeout: 60000 });
+    if (await page.locator('.auth-error:not([hidden])').count()) assert.fail('Login viewer ditolak: ' + (await page.locator('.auth-error').innerText()));
     await page.waitForTimeout(400);
     assert.ok(/tidak memiliki hak akses/.test(await page.locator('#view').innerText()));
     const navs = await page.locator('.nav-item').count();
@@ -536,8 +538,10 @@ async function step(name, fn) {
       await page.setViewportSize(vp);
       for (const h of ['dashboard', 'input', 'transactions']) {
         await go(h);
+        // grafik menyesuaikan ukuran secara asinkron setelah viewport berubah
+        const ok = await page.waitForFunction(() => document.documentElement.scrollWidth - window.innerWidth <= 1, null, { timeout: 5000 }).then(() => true, () => false);
         const over = await ev(() => document.documentElement.scrollWidth - window.innerWidth);
-        assert.ok(over <= 1, h + ' overflow ' + over);
+        assert.ok(ok, h + ' overflow ' + over);
       }
     });
   }

@@ -38,6 +38,15 @@ jobs:
       - name: Pasang Chromium untuk Playwright
         run: npx playwright install --with-deps chromium
       - name: Uji browser mode lokal
-        run: node tests/e2e.test.js
+        run: mkdir -p e2e-shots && E2E_SHOTS=e2e-shots node tests/e2e.test.js
       - name: Uji browser mode Supabase
-        run: PGDATABASE=noura_e2e node tests/e2e-supabase.test.js
+        if: ${{ !cancelled() }}
+        run: mkdir -p e2e-shots && E2E_SHOTS=e2e-shots PGDATABASE=noura_e2e node tests/e2e-supabase.test.js
+      - name: Simpan screenshot uji yang gagal
+        if: ${{ failure() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: e2e-screenshots
+          path: e2e-shots
+          if-no-files-found: ignore
+          retention-days: 7

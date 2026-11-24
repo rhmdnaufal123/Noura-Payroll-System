@@ -52,7 +52,7 @@
   .stepper-nav { grid-template-columns: repeat(4, auto); overflow-x: auto; }
   .stepper-nav li span { display: none; }
   .stepper-nav li.active span { display: inline; }
-  .slip-layout { grid-template-columns: 1fr; }
+  .slip-layout { grid-template-columns: minmax(0, 1fr); }
   .slip-list { max-height: 220px; }
   .recap-line { grid-template-columns: 1fr auto; }
   .recap-line > span:nth-child(2) { grid-column: 1; font-size: 12px; }

@@ -386,7 +386,7 @@ body.modal-open { overflow: hidden; }
   .user-btn { padding: 2px; }
   #banner-area { padding: 10px 16px 0; }
   .banner { flex-wrap: wrap; }
-  .grid-2, .grid-3, .grid-4, .grid-5 { grid-template-columns: 1fr; }
+  .grid-2, .grid-3, .grid-4, .grid-5 { grid-template-columns: minmax(0, 1fr); }
   .span-2, .span-3 { grid-column: auto; }
   .card { padding: 14px; border-radius: 12px; }
   h2 { font-size: 19px; }
