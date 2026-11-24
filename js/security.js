@@ -244,7 +244,10 @@
       document.body.appendChild(el);
       const form = el.querySelector('form');
       const err = el.querySelector('.auth-error');
-      setTimeout(() => form.querySelector(opts.locked ? '[name=password]' : '[name=username]').focus(), 50);
+      // Fokus awal langsung (tanpa timer) dan tidak pernah merebut fokus dari kolom yang sedang diisi:
+      // timer fokus dapat memindahkan ketikan kata sandi ke kolom email sehingga sandi terlihat.
+      const first = form.querySelector(opts.locked ? '[name=password]' : '[name=username]');
+      if (!form.contains(document.activeElement)) first.focus();
       const sw = el.querySelector('[data-act=switch]');
       if (sw) sw.onclick = () => logout();
       form.onsubmit = async (ev) => {

@@ -142,6 +142,8 @@
     modalDepth++;
     if (opt.onOpen) opt.onOpen(m);
     setTimeout(() => {
+      // Jangan merebut fokus bila pengguna sudah mulai mengisi kolom di dalam modal.
+      if (el.contains(document.activeElement) && document.activeElement !== document.body) return;
       const f = body.querySelector('input:not([type=hidden]):not([readonly]),select,textarea');
       if (f && opt.autofocus !== false && window.matchMedia('(pointer:fine)').matches) f.focus();
     }, 60);

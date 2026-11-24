@@ -85,6 +85,26 @@ async function step(name, fn) {
     await page.goto(BASE);
     await page.waitForSelector('.auth-screen', { timeout: 60000 });
   });
+  await step('kata sandi yang diketik cepat tidak berpindah ke kolom nama pengguna', async () => {
+    const p2 = await ctx.newPage();
+    await p2.addInitScript(() => {
+      // Meniru pengguna/pengisian otomatis yang langsung fokus ke kolom sandi saat layar login muncul.
+      new MutationObserver(() => {
+        const pw = document.querySelector('.auth-screen [name=password]');
+        if (pw && !window.__f) {
+          window.__f = 1;
+          pw.focus();
+        }
+      }).observe(document, { childList: true, subtree: true });
+    });
+    await p2.goto(BASE);
+    await p2.waitForSelector('.auth-screen');
+    await p2.waitForTimeout(150);
+    await p2.keyboard.type('Rahasia#2026');
+    const v = await p2.evaluate(() => ({ user: document.querySelector('[name=username]').value, pw: document.querySelector('[name=password]').value }));
+    await p2.close();
+    assert.deepStrictEqual(v, { user: '', pw: 'Rahasia#2026' });
+  });
   await step('login salah ditolak', async () => {
     await page.fill('[name=username]', 'admin');
     await page.fill('[name=password]', 'salah');
