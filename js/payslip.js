@@ -13,33 +13,33 @@
   const SLIP_CSS = `
 .slip{width:794px;min-height:1123px;box-sizing:border-box;padding:46px 52px 40px;background:#fff;color:#1f2937;font-family:'Plus Jakarta Sans','Segoe UI',Roboto,Arial,sans-serif;font-size:12px;line-height:1.45;position:relative;overflow:hidden}
 .slip *{box-sizing:border-box}
-.slip .s-head{display:flex;align-items:center;gap:16px;padding-bottom:14px;border-bottom:3px solid #059669}
+.slip .s-head{display:flex;align-items:center;gap:16px;padding-bottom:14px;border-bottom:3px solid #006b2a}
 .slip .s-head img{width:64px;height:64px;object-fit:contain}
 .slip .s-org{flex:1}
-.slip .s-org b{display:block;font-size:19px;color:#064e3b;letter-spacing:.2px}
+.slip .s-org b{display:block;font-size:19px;color:#003d18;letter-spacing:.2px}
 .slip .s-org small{display:block;color:#4b5563;font-size:11px}
 .slip .s-title{text-align:right}
-.slip .s-title h1{margin:0;font-size:22px;letter-spacing:3px;color:#059669}
+.slip .s-title h1{margin:0;font-size:22px;letter-spacing:3px;color:#006b2a}
 .slip .s-title span{display:block;font-size:11px;color:#4b5563}
-.slip .s-info{display:grid;grid-template-columns:1fr 1fr;gap:4px 28px;margin:16px 0 14px;padding:12px 14px;background:#f0fdf4;border:1px solid #d1fae5;border-radius:8px}
+.slip .s-info{display:grid;grid-template-columns:1fr 1fr;gap:4px 28px;margin:16px 0 14px;padding:12px 14px;background:#f1f8f3;border:1px solid #d3ebdb;border-radius:8px}
 .slip .s-info div{display:flex;gap:8px}
 .slip .s-info span{width:120px;color:#4b5563;flex:none}
 .slip .s-info b{font-weight:600}
 .slip .s-cols{display:grid;grid-template-columns:1fr 1fr;gap:18px;align-items:start}
 .slip table{width:100%;border-collapse:collapse}
-.slip .s-tbl th{background:#059669;color:#fff;text-align:left;padding:7px 10px;font-size:11.5px;letter-spacing:.6px}
+.slip .s-tbl th{background:#006b2a;color:#fff;text-align:left;padding:7px 10px;font-size:11.5px;letter-spacing:.6px}
 .slip .s-tbl td{padding:5px 10px;border-bottom:1px solid #e5e7eb;vertical-align:top}
 .slip .s-tbl td.r,.slip .s-tbl th.r{text-align:right;white-space:nowrap}
-.slip .s-tbl tr.grp td{background:#f9fafb;font-weight:700;color:#064e3b;font-size:11px;padding-top:6px}
+.slip .s-tbl tr.grp td{background:#f9fafb;font-weight:700;color:#003d18;font-size:11px;padding-top:6px}
 .slip .s-tbl tr.sub td{padding-left:22px;color:#374151}
 .slip .s-tbl td small{display:block;color:#6b7280;font-size:10px}
-.slip .s-tbl tr.tot td{font-weight:700;border-top:2px solid #059669;border-bottom:none;background:#ecfdf5}
-.slip .s-sum{margin-top:16px;border:2px solid #059669;border-radius:10px;overflow:hidden}
-.slip .s-sum .row{display:flex;justify-content:space-between;padding:7px 16px;border-bottom:1px solid #d1fae5}
-.slip .s-sum .thp{background:#064e3b;color:#fff;padding:12px 16px;font-size:16px;border:none}
+.slip .s-tbl tr.tot td{font-weight:700;border-top:2px solid #006b2a;border-bottom:none;background:#ebf5ee}
+.slip .s-sum{margin-top:16px;border:2px solid #006b2a;border-radius:10px;overflow:hidden}
+.slip .s-sum .row{display:flex;justify-content:space-between;padding:7px 16px;border-bottom:1px solid #d3ebdb}
+.slip .s-sum .thp{background:#003d18;color:#fff;padding:12px 16px;font-size:16px;border:none}
 .slip .s-sum .thp b{font-size:20px}
-.slip .s-terbilang{padding:7px 16px;font-style:italic;color:#065f46;background:#f0fdf4;font-size:11px}
-.slip h4{margin:16px 0 6px;font-size:12px;color:#064e3b;letter-spacing:.5px;text-transform:uppercase}
+.slip .s-terbilang{padding:7px 16px;font-style:italic;color:#004d1e;background:#f1f8f3;font-size:11px}
+.slip h4{margin:16px 0 6px;font-size:12px;color:#003d18;letter-spacing:.5px;text-transform:uppercase}
 .slip .s-detail td,.slip .s-detail th{padding:4px 8px;font-size:11px;border-bottom:1px solid #e5e7eb}
 .slip .s-detail th{background:#f3f4f6;text-align:left}
 .slip .s-detail .r{text-align:right}

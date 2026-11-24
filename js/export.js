@@ -85,7 +85,7 @@
     doc.setFont('helvetica', 'normal');
     doc.setFontSize(8.5);
     doc.text((unit.address || '') + (unit.phone ? ' · Telp. ' + unit.phone : ''), 31, y + 8);
-    doc.setDrawColor(5, 150, 105);
+    doc.setDrawColor(0, 107, 42);
     doc.setLineWidth(0.6);
     doc.line(14, y + 13, W - 14, y + 13);
     y += 20;
@@ -119,8 +119,8 @@
         foot: sec.foot,
         theme: 'grid',
         styles: { fontSize: opt.fontSize || 8, cellPadding: 1.6, lineColor: [226, 232, 240], lineWidth: 0.1 },
-        headStyles: { fillColor: [5, 150, 105], textColor: 255, fontStyle: 'bold' },
-        footStyles: { fillColor: [236, 253, 245], textColor: [6, 78, 59], fontStyle: 'bold' },
+        headStyles: { fillColor: [0, 107, 42], textColor: 255, fontStyle: 'bold' },
+        footStyles: { fillColor: [235, 245, 238], textColor: [0, 61, 24], fontStyle: 'bold' },
         alternateRowStyles: { fillColor: [248, 250, 252] },
         columnStyles: colStyles,
         margin: { left: 14, right: 14 },

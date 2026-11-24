@@ -364,8 +364,8 @@
 
   /* ---------- Grafik ---------- */
   /* Palet kategorikal tervalidasi (cek CVD & kontras) — terang & gelap, urutan tetap. */
-  const PAL_LIGHT = ['#059669', '#2563eb', '#d97706', '#7c3aed', '#db2777', '#0891b2'];
-  const PAL_DARK = ['#0ea371', '#3b82f6', '#d98a0b', '#8b5cf6', '#ec4899', '#0a9fba'];
+  const PAL_LIGHT = ['#006b2a', '#2563eb', '#d97706', '#7c3aed', '#db2777', '#0891b2'];
+  const PAL_DARK = ['#2e9e57', '#3b82f6', '#c98500', '#8b5cf6', '#ec4899', '#0a9fba'];
   ui.isDark = () => document.documentElement.getAttribute('data-theme') === 'dark' || (document.documentElement.getAttribute('data-theme') !== 'light' && window.matchMedia && matchMedia('(prefers-color-scheme: dark)').matches);
   ui.palette = () => (ui.isDark() ? PAL_DARK : PAL_LIGHT);
   /** Warna mengikuti entitas (bukan urutan): kategori bagian pendapatan. */

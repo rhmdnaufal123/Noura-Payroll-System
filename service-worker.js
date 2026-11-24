@@ -1,6 +1,6 @@
 /* Noura Payroll — service worker: cache aset aplikasi agar dapat dibuka offline (PWA).
  * Data tetap di IndexedDB; service worker hanya menyimpan file aplikasi. */
-const CACHE = 'noura-payroll-v1.0.1';
+const CACHE = 'noura-payroll-v1.0.2';
 const ASSETS = [
   './', './index.html', './manifest.json',
   './css/style.css', './css/dashboard.css', './css/employee.css', './css/transaction.css', './css/payroll.css', './css/report.css', './css/print.css',
