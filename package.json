@@ -1,0 +1,14 @@
+{
+  "name": "noura-payroll-system",
+  "version": "1.0.0",
+  "description": "Noura Payroll Management — penggajian, pembagian jasa pelayanan, dan administrasi Apotek Noura & Praktek Dokter Umum",
+  "private": true,
+  "scripts": {
+    "start": "python3 -m http.server 8080",
+    "test": "node tests/unit.test.js",
+    "test:e2e": "node tests/e2e.test.js"
+  },
+  "devDependencies": {
+    "playwright": "^1.47.0"
+  }
+}
