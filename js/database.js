@@ -166,7 +166,71 @@
   NP.db.DB_NAME = DB_NAME;
 
   /** Format nomor dokumen, mis. code('TRX', 12, 4) -> TRX-0012 */
-  NP.db.code = function (prefix, n, width) {
+  function code(prefix, n, width) {
     return prefix + '-' + String(n).padStart(width || 4, '0');
+  }
+  NP.db.code = code;
+
+  /* Driver cadangan di memori — dipakai bila browser memblokir IndexedDB (mode privat,
+   * pratinjau). API sama persis; data hilang saat halaman ditutup. Transaksi tetap atomik:
+   * bila fn gagal, seluruh perubahan dikembalikan dari salinan. */
+  const MemoryDriver = {
+    name: 'Memori sementara (data hilang saat halaman ditutup)',
+    multiDevice: false,
+    isMemory: true,
+    _data: null,
+    open() {
+      if (!this._data) {
+        this._data = {};
+        for (const s of STORE_NAMES) this._data[s] = new Map();
+      }
+      return Promise.resolve(this._data);
+    },
+    _key(s, o) {
+      return o[STORES[s].keyPath];
+    },
+    async run(stores, fn) {
+      await this.open();
+      const names = (Array.isArray(stores) ? stores : [stores]).filter((s, i, a) => a.indexOf(s) === i);
+      const snap = {};
+      for (const s of names) snap[s] = new Map([...this._data[s]].map(([k, v]) => [k, JSON.parse(JSON.stringify(v))]));
+      const d = this._data;
+      const cp = (v) => (v === undefined ? undefined : JSON.parse(JSON.stringify(v)));
+      const t = {
+        get: async (s, k) => cp(d[s].get(k)),
+        all: async (s) => [...d[s].values()].map(cp),
+        put: async (s, o) => {
+          d[s].set(this._key(s, o), cp(o));
+          return this._key(s, o);
+        },
+        del: async (s, k) => {
+          d[s].delete(k);
+        },
+        clear: async (s) => d[s].clear(),
+        nextNumber: async (key) => {
+          const cur = d.counters.get(key) || { key, value: 0 };
+          cur.value += 1;
+          d.counters.set(key, cp(cur));
+          return cur.value;
+        }
+      };
+      try {
+        return await fn(t);
+      } catch (e) {
+        for (const s of names) d[s] = snap[s];
+        throw e;
+      }
+    }
+  };
+  for (const m of ['get', 'all', 'put', 'putMany', 'del', 'clear', 'exportAll', 'importAll', 'estimate']) MemoryDriver[m] = IndexedDBDriver[m];
+  MemoryDriver.estimate = async () => null;
+
+  /** Ganti driver ke memori (dipanggil saat IndexedDB tidak dapat dibuka). */
+  NP.useMemoryDb = function () {
+    MemoryDriver.STORES = STORE_NAMES;
+    MemoryDriver.DB_NAME = DB_NAME + ' (memori)';
+    MemoryDriver.code = code;
+    NP.db = MemoryDriver;
+    return MemoryDriver;
   };
 })(typeof globalThis !== 'undefined' ? globalThis : window);

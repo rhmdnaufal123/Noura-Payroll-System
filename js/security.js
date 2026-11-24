@@ -162,7 +162,7 @@
     try {
       sessionStorage.removeItem(SESSION_KEY);
     } catch (_) {}
-    location.hash = '#/dashboard';
+    if (!(NP.ENV && NP.ENV.artifact)) location.hash = '#/dashboard';
     location.reload();
   }
 

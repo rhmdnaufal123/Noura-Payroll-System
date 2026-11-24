@@ -184,6 +184,7 @@
     async zipAll(run) {
       if (!root.JSZip) return ui.toast('Pustaka JSZip tidak tersedia.', 'error');
       if (!run.slips.length) return ui.toast('Tidak ada slip.', 'warning');
+      let zipOk = false;
       await ui.busy('Menyiapkan ZIP slip gaji...', async (progress) => {
         const zip = new JSZip();
         const folder = zip.folder('slip-gaji-' + run.period);
@@ -194,8 +195,9 @@
         }
         progress('Mengompres ZIP...');
         const blob = await zip.generateAsync({ type: 'blob' });
-        NP.exp.download(blob, 'slip-gaji-' + run.id + '.zip');
+        zipOk = await NP.exp.download(blob, 'slip-gaji-' + run.id + '.zip');
       });
+      if (!zipOk) return;
       NP.audit.log('payslip.zip', 'payroll', run.id, 'Unduh ZIP ' + run.slips.length + ' slip');
       ui.toast('ZIP berisi ' + run.slips.length + ' slip gaji diunduh.');
     },

@@ -4,6 +4,8 @@
   'use strict';
   const NP = (root.NP = root.NP || {});
   NP.pages = NP.pages || {};
+  /** Lingkungan: { artifact: true } pada versi online (claude.ai artifact). */
+  NP.ENV = Object.assign({ artifact: false }, root.NP_ENV || {});
 
   const MONTHS = ['Januari', 'Februari', 'Maret', 'April', 'Mei', 'Juni', 'Juli', 'Agustus', 'September', 'Oktober', 'November', 'Desember'];
   const MONTHS_SHORT = ['Jan', 'Feb', 'Mar', 'Apr', 'Mei', 'Jun', 'Jul', 'Agu', 'Sep', 'Okt', 'Nov', 'Des'];

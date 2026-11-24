@@ -62,9 +62,16 @@
     return Object.assign({ code, name: NP.C.UNITS[code] ? NP.C.UNITS[code].name : code }, x, { logo: x.logo || s.company.logo || 'assets/logo.png' });
   };
 
-  /* ---------- Router ---------- */
+  /* ---------- Router ----------
+   * Lokal: rute di hash URL (#/halaman?param). Versi online (artifact) hanya boleh memakai
+   * hash sederhana, sehingga rute disimpan di memori dan tautan "#/..." ditangkap. */
+  const memoryRouter = !!(NP.ENV && NP.ENV.artifact);
+  let memRoute = '#/dashboard';
+  function currentHash() {
+    return memoryRouter ? memRoute : location.hash;
+  }
   function parseHash() {
-    const h = location.hash.replace(/^#\/?/, '');
+    const h = currentHash().replace(/^#\/?/, '');
     const [path, qs] = h.split('?');
     const params = {};
     new URLSearchParams(qs || '').forEach((v, k) => (params[k] = v));
@@ -74,9 +81,23 @@
   NP.go = function (page, params) {
     const qs = params ? '?' + new URLSearchParams(params).toString() : '';
     const target = '#/' + page + qs;
+    if (memoryRouter) {
+      memRoute = target;
+      route();
+      return;
+    }
     if (location.hash === target) route();
     else location.hash = target;
   };
+  if (memoryRouter && typeof document !== 'undefined') {
+    document.addEventListener('click', (e) => {
+      const a = e.target.closest && e.target.closest('a[href^="#/"]');
+      if (!a) return;
+      e.preventDefault();
+      memRoute = a.getAttribute('href');
+      route();
+    });
+  }
 
   let routeSeq = 0;
   async function route() {
@@ -247,6 +268,7 @@
     const s = NP.state.settings;
     const usr = NP.sec.user();
     const out = [];
+    if (NP.db.isMemory) out.push(`<div class="banner banner-warning">${ui.icon('warn')}<span>Browser ini memblokir penyimpanan lokal, jadi data hanya bertahan selama halaman terbuka. Buka di jendela biasa (bukan mode privat) agar data tersimpan.</span></div>`);
     if (usr && usr.mustChange) out.push(`<div class="banner banner-warning">${ui.icon('lock')}<span>Akun <b>${u.esc(usr.username)}</b> masih memakai kata sandi bawaan.</span><button class="btn btn-sm btn-light" data-act="pw">Ganti sekarang</button></div>`);
     const days = u.toNum(s.backup.reminderDays);
     if (NP.sec.can('backup') && days > 0) {
@@ -297,8 +319,15 @@
       const theme = localStorage.getItem('noura.theme');
       if (theme) document.documentElement.setAttribute('data-theme', theme);
     } catch (_) {}
+    if (NP.ENV && NP.ENV.artifact) document.body.classList.add('env-artifact');
     try {
       await NP.db.open();
+    } catch (e) {
+      // Penyimpanan browser diblokir (mode privat, pratinjau, dll.): tetap jalan dengan database sementara.
+      console.warn('IndexedDB tidak tersedia, memakai database sementara', e);
+      NP.useMemoryDb();
+    }
+    try {
       await ensureSeed();
     } catch (e) {
       console.error(e);
@@ -316,10 +345,13 @@
     renderShell();
     renderBanners();
     NP.sec.startAutoLock();
-    window.addEventListener('hashchange', route);
-    if (!location.hash) location.hash = '#/dashboard';
-    else route();
-    if ('serviceWorker' in navigator && /^https?:/.test(location.protocol)) {
+    if (memoryRouter) route();
+    else {
+      window.addEventListener('hashchange', route);
+      if (!location.hash) location.hash = '#/dashboard';
+      else route();
+    }
+    if (!memoryRouter && 'serviceWorker' in navigator && /^https?:/.test(location.protocol)) {
       navigator.serviceWorker.register('service-worker.js').catch((e) => console.warn('SW gagal', e));
     }
   }

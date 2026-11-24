@@ -379,12 +379,12 @@ body.modal-open { overflow: hidden; }
 }
 @media (max-width: 760px) {
   body { font-size: 14.5px; }
-  .view { padding: 14px 12px 40px; }
-  .topbar { padding: 8px 12px; min-height: 56px; }
+  .view { padding: 14px 16px 40px; }
+  .topbar { padding: 8px 16px; min-height: 56px; }
   .topbar h1 { font-size: 16px; }
   .period-chip, .user-meta { display: none; }
   .user-btn { padding: 2px; }
-  #banner-area { padding: 10px 12px 0; }
+  #banner-area { padding: 10px 16px 0; }
   .banner { flex-wrap: wrap; }
   .grid-2, .grid-3, .grid-4, .grid-5 { grid-template-columns: 1fr; }
   .span-2, .span-3 { grid-column: auto; }
@@ -410,3 +410,6 @@ body.modal-open { overflow: hidden; }
 .auth-brand-full .auth-sub { letter-spacing: .22em; font-weight: 700; color: var(--muted); }
 :root[data-theme="dark"] .auth-wordmark { background: #fff; border-radius: 12px; padding: 10px 14px; }
 @media (prefers-color-scheme: dark) { :root:where(:not([data-theme="light"])) .auth-wordmark { background: #fff; border-radius: 12px; padding: 10px 14px; } }
+
+/* Versi online: sandbox tidak mengizinkan dialog cetak, jadi tombol cetak disembunyikan. */
+.env-artifact :is(button, a):has(> .ico-print) { display: none !important; }

@@ -22,6 +22,10 @@ python3 -m http.server 8080
 
 Lalu pilih *Install app* / *Tambahkan ke Layar Utama* di browser (desktop, Android, iPhone/iPad). Semua pustaka disertakan di folder `vendor/`, jadi aplikasi tetap berjalan tanpa internet.
 
+### Versi online (artifact claude.ai)
+
+`artifact.html` adalah halaman yang sama untuk dipublikasikan sebagai artifact claude.ai (memakai `NP_ENV.artifact`). Penyesuaiannya: navigasi disimpan di memori (sandbox hanya mengizinkan hash sederhana), unduhan Excel/PDF/PNG/ZIP/backup memakai kapabilitas `downloads` (pengguna mengonfirmasi tiap unduhan), tombol cetak disembunyikan (unduh PDF lalu cetak), dan bila browser memblokir penyimpanan, aplikasi berjalan dengan database sementara disertai peringatan. Data versi online tetap tersimpan di browser masing-masing pengguna.
+
 ### Akun awal
 
 | Nama pengguna | Kata sandi | Hak akses |

@@ -7,7 +7,27 @@
 
   const exp = {};
 
-  exp.download = function (blob, filename) {
+  /** Unduh berkas. Versi online (artifact claude.ai) memakai kapabilitas `downloads`
+   * karena sandbox memblokir unduhan biasa. Mengembalikan true bila diserahkan ke browser. */
+  exp.download = async function (blob, filename) {
+    if (NP.ENV && NP.ENV.artifact) {
+      const dl = root.claude && root.claude.use ? await root.claude.use('downloads') : null;
+      if (!dl) {
+        ui.toast('Unduhan tidak tersedia di tampilan ini. Buka artifact di browser untuk mengunduh.', 'error');
+        return false;
+      }
+      try {
+        await dl.save({ filename, data: blob });
+        return true;
+      } catch (e) {
+        const code = e && e.code;
+        if (code === 'declined') ui.toast('Unduhan dibatalkan.', 'info');
+        else if (code === 'rate_limited') ui.toast('Masih ada unduhan yang menunggu konfirmasi. Coba lagi sebentar.', 'warning');
+        else if (code === 'host_unavailable') ui.toast('Aplikasi ini tidak dapat menyimpan file. Buka di browser atau komputer.', 'error');
+        else ui.toast('File tidak dapat diunduh' + (e && e.message ? ': ' + e.message : '.'), 'error');
+        return false;
+      }
+    }
     const a = document.createElement('a');
     const url = URL.createObjectURL(blob);
     a.href = url;
@@ -18,6 +38,7 @@
       URL.revokeObjectURL(url);
       a.remove();
     }, 1500);
+    return true;
   };
 
   /** sheets: [{ name, rows: [obj] | aoa: [[...]] }] */
@@ -37,8 +58,11 @@
         }
       XLSX.utils.book_append_sheet(wb, ws, String(sh.name || 'Sheet').slice(0, 31).replace(/[\\/?*[\]:]/g, ' '));
     }
-    XLSX.writeFile(wb, filename);
-    ui.toast('File Excel diunduh: ' + filename, 'info');
+    const out = XLSX.write(wb, { bookType: 'xlsx', type: 'array' });
+    return exp.download(new Blob([out], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' }), filename).then((ok) => {
+      if (ok) ui.toast('File Excel diunduh: ' + filename, 'info');
+      return ok;
+    });
   };
 
   exp.readExcel = async function (file) {
@@ -148,12 +172,15 @@
       doc.text('( ' + ((NP.sec.user() || {}).name || '..................') + ' )', 30, y + 22);
       doc.text('( ' + (unit.leaderName || '..................') + ' )', W - 70, y + 22);
     }
-    doc.save(opt.filename || 'laporan.pdf');
-    ui.toast('PDF diunduh: ' + (opt.filename || 'laporan.pdf'), 'info');
+    if (await exp.download(doc.output('blob'), opt.filename || 'laporan.pdf')) ui.toast('PDF diunduh: ' + (opt.filename || 'laporan.pdf'), 'info');
   };
 
   /** Cetak HTML langsung (memakai kontainer #print-root dan css/print.css). */
   exp.printHtml = function (html, title) {
+    if (NP.ENV && NP.ENV.artifact) {
+      ui.toast('Cetak langsung tidak tersedia di versi online. Unduh PDF lalu cetak dari file tersebut.', 'info');
+      return;
+    }
     let rootEl = document.getElementById('print-root');
     if (!rootEl) {
       rootEl = document.createElement('div');

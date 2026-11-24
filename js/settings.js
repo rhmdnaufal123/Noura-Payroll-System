@@ -127,7 +127,8 @@
     async download() {
       const b = await backup.build();
       const name = 'backup-noura-payroll-' + u.todayISO() + '-' + u.pad(new Date().getHours()) + u.pad(new Date().getMinutes()) + '.json';
-      NP.exp.download(new Blob([JSON.stringify(b)], { type: 'application/json' }), name);
+      const ok = await NP.exp.download(new Blob([JSON.stringify(b)], { type: 'application/json' }), name);
+      if (!ok) return null;
       await NP.saveSettings({ backup: { lastBackup: Date.now() } });
       await NP.audit.log('backup.download', 'system', '', 'Backup database (' + Object.entries(b.counts).map(([k, v]) => k + ':' + v).join(', ') + ')');
       ui.toast('Backup diunduh: ' + name);
