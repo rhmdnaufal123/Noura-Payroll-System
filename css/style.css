@@ -276,7 +276,10 @@ input[type="checkbox"], input[type="radio"] { width: 18px; height: 18px; min-hei
 .stat-ic { width: 38px; height: 38px; border-radius: 10px; background: var(--primary-50); color: var(--primary-ink); display: flex; align-items: center; justify-content: center; flex: none; }
 .stat-body { min-width: 0; }
 .stat-label { font-size: 12px; color: var(--muted); font-weight: 600; }
-.stat-value { font-size: clamp(16px, 1.45vw, 20px); font-weight: 800; letter-spacing: -.01em; overflow-wrap: anywhere; line-height: 1.25; }
+.stat-value { font-size: clamp(15px, 9.5cqi, 20px); font-weight: 800; letter-spacing: -.01em; overflow-wrap: normal; line-height: 1.25; }
+/* Kartu statistik menyesuaikan lebarnya sendiri: angka tidak terpotong di tengah (mis. "Rp2.600.00 / 0" di iPad). */
+.stat { container-type: inline-size; }
+@container (max-width: 240px) { .stat-ic { display: none; } }
 .stat-sub { font-size: 11.5px; color: var(--muted); }
 .stat-hero { background: linear-gradient(135deg, #006b2a, #004d1e) !important; color: #fff; border-color: transparent; }
 .stat-hero .stat-label, .stat-hero .stat-sub { color: #d3ebdb; }
@@ -420,3 +423,4 @@ body.modal-open { overflow: hidden; }
 
 /* Versi online: sandbox tidak mengizinkan dialog cetak, jadi tombol cetak disembunyikan. */
 .env-artifact :is(button, a):has(> .ico-print) { display: none !important; }
+.sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0; }

@@ -368,5 +368,65 @@ console.log('Impor POS, input bulanan & analisis tindakan');
   });
 }
 
+console.log('Impor biaya dokter (penebusan resep)');
+{
+  js('resep-import.js');
+  const rf = require('./support/resep-fixture.js');
+  const pf = require('./support/pos-fixture.js');
+  const RF = rf.build();
+  const rx = NP.resep.parseSheet(RF.aoa);
+  const kasir = NP.pos.parseSheet(pf.build().aoa).lines;
+  const fee = { id: 'TND-0100', name: 'Pemeriksaan Dokter', category: 'Pemeriksaan dokter', unit: 'KLINIK', price: 100000, active: true, overrides: [], shares: [{ type: 'unit', target: 'KLINIK', mode: 'remainder', value: 0 }, { type: 'role', target: 'dokter', mode: 'percent', value: 70 }] };
+  const emps = [{ id: 'KRY-0009', name: 'dr. Contoh Dokter, Sp.PD', position: 'Dokter Umum', status: 'aktif' }];
+  const base = { doctors: new Set(['dr. Contoh Dokter']), docMap: { 'dr. Contoh Dokter': 'KRY-0009' }, service: fee, employees: emps, kasirLines: kasir, trxs: [] };
+
+  test('membaca file Penebusan Resep: periode, kolom Service, baris produk lanjutan', () => {
+    assert.strictEqual(rx.rows.length, RF.expect.rows);
+    assert.deepStrictEqual([rx.meta.from, rx.meta.to], ['2026-10-01', '2026-10-28']);
+    assert.deepStrictEqual([rx.rows[0].date, rx.rows[0].time, rx.rows[0].service, rx.rows[0].products.length], ['2026-10-01', '09:05', 100000, 2]);
+    assert.deepStrictEqual(Object.fromEntries(NP.resep.doctorSummary(rx.rows).map((d) => [d.doctor, d.count])), RF.expect.doctors);
+    assert.strictEqual(NP.resep.parseSheet(pf.build().aoa), null, 'file penjualan bukan file resep');
+  });
+  test('nama pasien dicocokkan tanpa sapaan, tanda baca & huruf besar/kecil', () => {
+    const k = NP.resep.patientKey;
+    assert.strictEqual(k('NY.PASIEN UJI 1'), k('Ny. PASIEN UJI 1'));
+    assert.strictEqual(k('ny pasien uji 5'), k('Ny. PASIEN UJI 5'));
+    assert.strictEqual(k('By. M.  MUJTABA'), 'M MUJTABA');
+    assert.notStrictEqual(k('Tn. RICO'), k('Tn. RICO A'));
+  });
+  test('rencana: hanya dokter terpilih; Rp0 dilewati; service < Rp100.000 & pasien sama ditandai', () => {
+    const P = NP.resep.plan(rx.rows, base);
+    const E = RF.expect.main;
+    assert.strictEqual(P.rows.length, E.rows, 'Puskesmas tidak ikut');
+    assert.deepStrictEqual([P.stats.low, P.stats.zero, P.stats.kasir], [E.low, E.zero, E.kasir]);
+    assert.strictEqual(P.transactions.length, E.importable);
+    assert.strictEqual(u.sum(P.transactions, (t) => t.items[0].price), E.gross);
+    assert.ok(P.transactions.every((t) => /^RESEP:Resep\/RXUJI-\d+$/.test(t.externalRef) && t.items[0].performers.dokter === 'KRY-0009' && t.items[0].serviceId === fee.id));
+    const low = P.rows.find((x) => x.service === 50000);
+    assert.ok(low.low && low.kasir.length === 1 && low.kasir[0].services.length > 0, 'struk kasir pasien yang sama memuat tindakan');
+    assert.deepStrictEqual(P.blocking, []);
+  });
+  test('rencana: dokter belum dicocokkan → diblokir; biaya dokter sudah tercatat / sudah diimpor → tidak ikut', () => {
+    const P1 = NP.resep.plan(rx.rows, Object.assign({}, base, { docMap: {} }));
+    assert.ok(P1.blocking.length > 0 && /Dokter pelaksana belum dipilih/.test(P1.blocking[0].problems.join(' ')));
+    const trxs = [
+      { id: 'TRX-1', date: '2026-10-03', patient: 'NY. PASIEN UJI 3', status: 'active', items: [{ serviceId: fee.id, serviceName: fee.name, qty: 1 }] },
+      { id: 'TRX-2', date: '2026-10-06', patient: 'x', status: 'active', externalRef: 'RESEP:Resep/RXUJI-4', items: [] }
+    ];
+    const P2 = NP.resep.plan(rx.rows, Object.assign({}, base, { trxs }));
+    const p3 = P2.rows.find((x) => x.code === 'Resep/RXUJI-2');
+    assert.ok(p3.db.length === 1 && p3.dbDoctorFee && !p3.include, 'biaya dokter pasien yang sama sudah ada → tidak dicentang');
+    assert.ok(P2.rows.find((x) => x.code === 'Resep/RXUJI-4').already);
+    assert.strictEqual(P2.transactions.length, RF.expect.main.importable - 2);
+    const P3 = NP.resep.plan(rx.rows, Object.assign({}, base, { trxs, included: new Set(['Resep/RXUJI-2']) }));
+    assert.strictEqual(P3.transactions.length, RF.expect.main.importable - 1, 'centang manual tetap dihormati');
+  });
+  test('saran tindakan: "Pemeriksaan Dokter" dipilih, versi Homecare tidak', () => {
+    const list = [{ id: 'A', name: 'Pemeriksaan Dokter Umum HC', category: 'Homecare', price: 300000, active: true }, { id: 'B', name: 'Pemeriksaan Dokter', category: 'Dokter Umum & Bidan', price: 100000, active: true }, { id: 'C', name: 'Suntik KB', category: 'Tindakan kebidanan', price: 65000, active: true }];
+    assert.strictEqual(NP.resep.suggestService(list).id, 'B');
+    assert.strictEqual(NP.resep.suggestService(list.slice(2)), null);
+  });
+}
+
 console.log('\n' + passed + ' lulus, ' + failures.length + ' gagal');
 if (failures.length) process.exit(1);

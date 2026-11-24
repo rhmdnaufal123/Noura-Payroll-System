@@ -137,3 +137,27 @@
   .share-row > .icon-btn { grid-column: 3; grid-row: 1; }
   .share-head { display: none; }
 }
+/* ===== Impor biaya dokter (resep) ===== */
+.rx-kasir { display: flex; align-items: center; justify-content: space-between; gap: 10px; flex-wrap: wrap; padding: 10px 12px; border: 1px dashed var(--border-strong); border-radius: 10px; font-size: 13px; }
+.rx-kasir > span { display: inline-flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+.rx-docs select { min-width: 200px; }
+.flag { display: inline-block; font-size: 11.5px; font-weight: 600; line-height: 1.35; padding: 2px 7px; border-radius: 6px; margin: 1px 2px 1px 0; border: 1px solid transparent; }
+.flag-low { background: var(--warning-50); color: var(--warning); border-color: color-mix(in srgb, var(--warning) 35%, transparent); }
+.flag-zero { background: var(--danger-50); color: var(--danger); border-color: color-mix(in srgb, var(--danger) 35%, transparent); }
+.flag-dup { background: var(--info-50); color: var(--info); border-color: color-mix(in srgb, var(--info) 35%, transparent); }
+.flag-db { background: color-mix(in srgb, #7c3aed 10%, var(--surface)); color: #6d28d9; border-color: color-mix(in srgb, #7c3aed 30%, transparent); }
+.flag-done { background: var(--surface-2); color: var(--text-2); border-color: var(--border); }
+.rx-legend { display: flex; flex-wrap: wrap; gap: 6px 18px; font-size: 12.5px; color: var(--text-2); margin: -4px 0 10px; }
+.rx-legend span { display: inline-flex; align-items: center; gap: 6px; }
+.rx-sw { width: 14px; height: 14px; border-radius: 4px; display: inline-block; border: 1px solid var(--border-strong); }
+.rx-sw-low { background: var(--warning-50); border-color: var(--warning); }
+.rx-sw-zero { background: var(--danger-50); border-color: var(--danger); }
+.rx-sw-dup { background: var(--surface); box-shadow: inset 4px 0 0 var(--info); border-color: var(--info); }
+.tbl tr.rx-low > td { background: var(--warning-50); }
+.tbl tr.rx-zero > td { background: var(--danger-50); }
+.tbl tr.rx-dup > td:first-child { box-shadow: inset 4px 0 0 var(--info); }
+.tbl tr.rx-off > td:not(:first-child) { opacity: .55; }
+.stat.stat-warn { border-color: color-mix(in srgb, var(--warning) 45%, transparent); background: var(--warning-50); }
+.stat.stat-info { border-color: color-mix(in srgb, var(--info) 40%, transparent); background: var(--info-50); }
+@media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) .flag-db { color: #c4b5fd; } }
+:root[data-theme="dark"] .flag-db { color: #c4b5fd; }

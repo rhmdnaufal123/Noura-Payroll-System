@@ -83,19 +83,20 @@
     if (/^\d{4}-\d{2}$/.test(params.month || '')) st.period = params.month;
     view.innerHTML = `
       <div class="page-head">
-        <div><h2>Input Bulanan</h2><p class="muted">Masukkan tindakan sekaligus untuk satu bulan — lewat tabel per tanggal atau impor file penjualan POS.</p></div>
+        <div><h2>Input Bulanan</h2><p class="muted">Masukkan tindakan sekaligus untuk satu bulan — lewat tabel per tanggal, impor file penjualan kasir (POS), atau impor biaya pemeriksaan dokter dari file penebusan resep.</p></div>
         <div class="actions"><a class="btn btn-ghost" href="#/analysis">${ui.icon('pie')}<span>Analisis Tindakan</span></a></div>
       </div>
       <div id="bk-tabs"></div>
       <div id="bk-body"></div>`;
     const body = ui.$('#bk-body', view);
-    ui.tabs(ui.$('#bk-tabs', view), [{ key: 'grid', label: 'Tabel bulanan', icon: 'calendar' }, { key: 'pos', label: 'Impor file POS', icon: 'upload' }], st.tab, (k) => {
+    ui.tabs(ui.$('#bk-tabs', view), [{ key: 'grid', label: 'Tabel bulanan', icon: 'calendar' }, { key: 'pos', label: 'Impor file POS', icon: 'upload' }, { key: 'resep', label: 'Impor biaya dokter (resep)', icon: 'medical' }], st.tab, (k) => {
       st.tab = k;
       draw();
     });
     async function draw() {
       body.innerHTML = '<div class="loading"><div class="spinner"></div></div>';
       if (st.tab === 'pos') await renderPos(body);
+      else if (st.tab === 'resep') await renderResep(body);
       else await renderGrid(body);
     }
     await draw();
@@ -350,6 +351,18 @@
   /* ===================== Impor file POS ===================== */
   const pos = { file: null, parsed: null, cats: null, defaults: {}, doctorMode: 'column' };
 
+  /** Pilih & baca file penjualan kasir (dipakai tab Impor POS dan pembanding di tab resep). */
+  async function pickKasirFile() {
+    const f = await ui.pickFile('.xlsx,.xls,.csv');
+    if (!f) return false;
+    if (!root.XLSX) throw new Error('Pustaka Excel (SheetJS) tidak tersedia.');
+    const parsed = NP.pos.parseWorkbook(XLSX.read(await ui.readFile(f, 'buffer'), { type: 'array' }), XLSX);
+    pos.file = f.name;
+    pos.parsed = parsed;
+    pos.cats = new Set(NP.pos.categorySummary(parsed.lines).filter((c) => c.service).map((c) => c.category));
+    return true;
+  }
+
   async function renderPos(outer) {
     const [services, employees, trxs] = await Promise.all([NP.svc.all(), NP.emp.all(), NP.trx.all()]);
     const host = freshHost(outer);
@@ -365,15 +378,8 @@
       </div>
       <div id="pos-body"></div>`;
     host.querySelector('[data-act="pick"]').onclick = async () => {
-      const f = await ui.pickFile('.xlsx,.xls,.csv');
-      if (!f) return;
       try {
-        if (!root.XLSX) throw new Error('Pustaka Excel (SheetJS) tidak tersedia.');
-        const buf = await ui.readFile(f, 'buffer');
-        const parsed = NP.pos.parseWorkbook(XLSX.read(buf, { type: 'array' }), XLSX);
-        pos.file = f.name;
-        pos.parsed = parsed;
-        pos.cats = new Set(NP.pos.categorySummary(parsed.lines).filter((c) => c.service).map((c) => c.category));
+        if (!(await pickKasirFile())) return;
         renderPos(outer);
       } catch (e) {
         ui.toast(e.message, 'error');
@@ -523,6 +529,195 @@
           ui.toast(err.message, 'error');
         }
         renderPos(outer);
+      }
+    });
+  }
+
+
+  /* ===================== Impor biaya dokter (file Penebusan Resep) ===================== */
+  const rx = { file: null, parsed: null, doctors: null, docMap: {}, serviceId: '', excluded: new Set(), included: new Set(), onlyFlagged: false };
+  const shortCode = (c) => String(c).replace(/^Resep\//i, '');
+
+  async function renderResep(outer) {
+    const [services, employees, trxs] = await Promise.all([NP.svc.all(), NP.emp.all(), NP.trx.all()]);
+    const host = freshHost(outer);
+    const canMaster = NP.sec.can('services.edit');
+    const doctorsStaff = staffFor(employees, 'dokter');
+    const rerender = async () => {
+      const y = window.scrollY;
+      await renderResep(outer);
+      window.scrollTo(0, y);
+    };
+    host.innerHTML = `
+      <div class="card">
+        <div class="card-head"><h3>1. File penebusan resep</h3></div>
+        <p class="muted small">Gunakan file ekspor <b>Penebusan Resep</b> dari aplikasi kasir (kolom Nama/Kode Resep, Nama Pasien, Nama Dokter, Service). Kolom <b>Service</b> diimpor sebagai biaya pemeriksaan dokter — satu resep menjadi satu transaksi. Resep yang sudah pernah diimpor otomatis dilewati.</p>
+        <div class="filters">
+          <button type="button" class="btn btn-primary" data-rx="pick">${ui.icon('upload')}<span>${rx.parsed ? 'Ganti file resep' : 'Pilih file resep'}</span></button>
+          ${rx.parsed ? `<span class="pos-file">${ui.icon('excel')}<b>${u.esc(rx.file)}</b> · ${u.esc(rx.parsed.meta.outlet || '')} · ${rx.parsed.meta.from ? u.fmtDate(rx.parsed.meta.from) + ' – ' + u.fmtDate(rx.parsed.meta.to) : ''} · ${u.num(rx.parsed.rows.length)} resep</span>` : ''}
+        </div>
+        <div class="rx-kasir">
+          <span>${ui.icon('search')}<b>Pembanding file penjualan kasir:</b> ${pos.parsed ? `${u.esc(pos.file)} <small class="muted">(${u.num(new Set(pos.parsed.lines.map((l) => l.ref)).size)} struk)</small>` : '<span class="muted">belum dipilih — pasien hanya dicocokkan dengan transaksi di database</span>'}</span>
+          <button type="button" class="btn btn-sm btn-ghost" data-rx="kasir">${ui.icon('excel')}<span>${pos.parsed ? 'Ganti file kasir' : 'Pilih file penjualan kasir'}</span></button>
+        </div>
+      </div>
+      <div id="rx-body"></div>`;
+    host.addEventListener('click', async (e) => {
+      const b = e.target.closest('[data-rx]');
+      if (!b || !host.contains(b)) return;
+      try {
+        if (b.dataset.rx === 'pick') {
+          const f = await ui.pickFile('.xlsx,.xls,.csv');
+          if (!f) return;
+          if (!root.XLSX) throw new Error('Pustaka Excel (SheetJS) tidak tersedia.');
+          rx.parsed = NP.resep.parseWorkbook(XLSX.read(await ui.readFile(f, 'buffer'), { type: 'array' }), XLSX);
+          rx.file = f.name;
+          rx.doctors = null;
+          rx.docMap = {};
+          rx.excluded = new Set();
+          rx.included = new Set();
+          renderResep(outer);
+        } else if (b.dataset.rx === 'kasir') {
+          if (await pickKasirFile()) rerender();
+        }
+      } catch (err) {
+        ui.toast(err.message, 'error');
+      }
+    });
+    if (!rx.parsed) return;
+
+    const docs = NP.resep.doctorSummary(rx.parsed.rows);
+    for (const d of docs) {
+      if (!(d.doctor in rx.docMap)) {
+        const m = NP.pos.matchEmployee(d.doctor, doctorsStaff);
+        rx.docMap[d.doctor] = m ? m.id : '';
+      }
+    }
+    if (!rx.doctors) rx.doctors = new Set(docs.filter((d) => rx.docMap[d.doctor]).map((d) => d.doctor));
+    if (!services.some((x) => x.id === rx.serviceId && x.active)) {
+      const sg = NP.resep.suggestService(services);
+      rx.serviceId = sg ? sg.id : '';
+    }
+    const service = services.find((x) => x.id === rx.serviceId) || null;
+    const P = NP.resep.plan(rx.parsed.rows, { doctors: rx.doctors, docMap: rx.docMap, service, employees, kasirLines: pos.parsed ? pos.parsed.lines : null, trxs, excluded: rx.excluded, included: rx.included });
+    const S = P.stats;
+    const active = services.filter((x) => x.active);
+    const byCat = u.groupBy(active, (x) => x.category);
+    const svcOpts = '<option value="">— pilih tindakan —</option>' + C.SERVICE_CATEGORIES.filter((c) => byCat.has(c)).map((c) => `<optgroup label="${u.esc(c)}">${byCat.get(c).map((x) => `<option value="${x.id}" ${x.id === rx.serviceId ? 'selected' : ''}>${u.esc(x.name)} — ${u.rp(x.price)}</option>`).join('')}</optgroup>`).join('');
+    const empMap = new Map(employees.map((e) => [e.id, e]));
+    const bodyEl = ui.$('#rx-body', host);
+    bodyEl.innerHTML = `
+      <div class="card">
+        <div class="card-head"><h3>2. Dokter yang diimpor</h3></div>
+        <p class="muted small">Centang dokter yang biaya pemeriksaannya masuk ke penggajian/pendapatan praktek. Dokter luar (mis. puskesmas, dokter gigi luar) biasanya tidak dicentang. Cocokkan dengan dokter di Data Karyawan agar jasa dokter tercatat.</p>
+        <div class="table-wrap"><table class="tbl rx-docs"><thead><tr><th></th><th>Dokter di file</th><th class="ta-right">Resep</th><th class="ta-right">Total service</th><th>Dokter di Data Karyawan</th></tr></thead><tbody>
+          ${docs.map((d) => `<tr><td><input type="checkbox" data-doc="${u.esc(d.doctor)}" ${rx.doctors.has(d.doctor) ? 'checked' : ''} aria-label="Impor ${u.esc(d.doctor)}"></td>
+            <td><b>${u.esc(d.doctor)}</b>${d.low ? `<small class="block"><span class="flag flag-low">${d.low} resep di bawah Rp100.000</span></small>` : ''}</td>
+            <td class="ta-right">${u.num(d.count)}</td><td class="ta-right">${u.rp(d.service)}</td>
+            <td><select data-docmap="${u.esc(d.doctor)}" aria-label="Karyawan untuk ${u.esc(d.doctor)}">${ui.options(doctorsStaff.map((e) => [e.id, e.name]), rx.docMap[d.doctor], '— tidak dicocokkan —')}</select></td></tr>`).join('')}
+        </tbody></table></div>
+        ${doctorsStaff.length ? '' : `<div class="alert alert-warning">${ui.icon('warn')}<div>Belum ada karyawan berjabatan <b>Dokter Umum</b> di Data Karyawan. Tambahkan dokter terlebih dahulu agar biaya pemeriksaan tercatat sebagai jasa dokter.</div></div>`}
+      </div>
+      <div class="card">
+        <div class="card-head"><h3>3. Tindakan untuk biaya pemeriksaan</h3></div>
+        <div class="grid-2">
+          <label class="field"><span>Master tindakan <b class="req">*</b></span><select data-rxsvc>${svcOpts}</select></label>
+          <div class="field"><span>Pembagian</span>${service ? `<div class="share-chips">${NP.svc.shareSummary(service, empMap, rs.hasDoctorVariant(service) ? service.doctorShares : null)}</div><small class="muted">${rs.hasDoctorVariant(service) ? 'Memakai pembagian <b>dengan dokter</b>.' : ''} Harga tiap transaksi mengikuti kolom Service di file.</small>` : '<small class="muted">Pilih tindakan.</small>'}</div>
+        </div>
+        ${!service ? `<div class="alert alert-info">${ui.icon('info')}<div>Belum ada tindakan "Pemeriksaan Dokter" di Master Tindakan. ${canMaster ? 'Buat sekarang lalu atur pembagian jasa dokternya di Master Tindakan sebelum mengimpor.' : 'Minta Administrator membuatnya di Master Tindakan.'}</div>${canMaster ? `<button type="button" class="btn btn-sm btn-primary" data-rx="create-fee">${ui.icon('plus')}<span>Buat "Biaya Pemeriksaan Dokter"</span></button>` : ''}</div>` : ''}
+      </div>
+      <div class="card">
+        <div class="card-head"><h3>4. Pratinjau</h3><label class="check"><input type="checkbox" data-rx-only ${rx.onlyFlagged ? 'checked' : ''}><span>Hanya yang ditandai</span></label></div>
+        <div class="stats-row">
+          ${ui.stat('Akan diimpor', u.num(S.chosen) + ' / ' + u.num(S.rows), { icon: 'input', sub: S.already ? u.num(S.already) + ' sudah pernah diimpor' : 'resep dari dokter terpilih' })}
+          ${ui.stat('Total biaya dokter', u.rp(S.gross), { icon: 'wallet' })}
+          ${ui.stat('Service < Rp100.000', u.num(S.low), { icon: 'warn', cls: S.low ? 'stat-warn' : '', sub: S.zero ? u.num(S.zero) + ' bernilai Rp0 (tidak diimpor)' : 'tidak ada Rp0' })}
+          ${ui.stat('Pasien sama', u.num(S.kasir + S.db), { icon: 'users', cls: S.kasir + S.db ? 'stat-info' : '', sub: (pos.parsed ? u.num(S.kasir) + ' di file kasir' + (S.kasirTindakan ? ' (' + u.num(S.kasirTindakan) + ' dengan tindakan)' : '') : 'file kasir belum dipilih') + ' · ' + u.num(S.db) + ' di database' })}
+        </div>
+        <div class="rx-legend"><span><i class="rx-sw rx-sw-low"></i>Biaya service di bawah Rp100.000</span><span><i class="rx-sw rx-sw-zero"></i>Rp0 — tidak diimpor</span><span><i class="rx-sw rx-sw-dup"></i>Pasien sama (nama &amp; tanggal) di file kasir / database</span></div>
+        ${P.blocking.length ? `<div class="alert alert-warning">${ui.icon('warn')}<div><b>Perlu diperbaiki sebelum impor (${P.blocking.length} resep):</b><ul>${[...new Set([].concat(...P.blocking.map((x) => x.problems)))].slice(0, 6).map((m) => `<li>${u.esc(m)}</li>`).join('')}</ul></div></div>` : ''}
+        <div id="rx-table"></div>
+        <div class="form-actions"><button type="button" class="btn btn-primary" data-rx="import" ${!P.transactions.length || P.blocking.length || !service ? 'disabled' : ''}>${ui.icon('check')}<span>Impor ${u.num(P.transactions.length)} biaya dokter</span></button></div>
+      </div>`;
+
+    const flagged = (x) => x.low || x.kasir.length || x.db.length || x.already;
+    ui.table(ui.$('#rx-table', bodyEl), {
+      columns: [
+        { key: 'inc', label: '<span class="sr-only">Impor</span>', sortable: false, render: (x) => `<input type="checkbox" data-inc="${u.esc(x.code)}" ${x.include ? 'checked' : ''} ${x.zero || x.already ? 'disabled' : ''} aria-label="Impor ${u.esc(x.code)}">` },
+        { key: 'date', label: 'Tanggal', render: (x) => u.fmtDate(x.date) + (x.time ? `<small class="block muted">${x.time}</small>` : '') },
+        { key: 'patient', label: 'Pasien', render: (x) => `<b>${u.esc(x.patient || '-')}</b><small class="block muted">${u.esc(shortCode(x.code))}</small>` },
+        { key: 'doctor', label: 'Dokter', render: (x) => u.esc(x.doctor) + (x.empId ? '' : '<small class="block text-warning">belum dicocokkan</small>') },
+        { key: 'service', label: 'Biaya service', align: 'right', render: (x) => `<b>${u.rp(x.service)}</b>${x.zero ? '<small class="block"><span class="flag flag-zero">Rp0 — dilewati</span></small>' : x.low ? '<small class="block"><span class="flag flag-low">di bawah Rp100.000</span></small>' : ''}` },
+        {
+          key: 'flags', label: 'Penanda', sortable: false, render: (x) => [
+            x.already ? '<span class="flag flag-done">Sudah pernah diimpor</span>' : '',
+            ...x.kasir.map((k) => `<span class="flag flag-dup" title="Struk kasir ${u.esc(k.ref)}">Kasir ${u.esc(k.ref)}${k.services.length ? ': ' + u.esc(k.services.join(', ')) : ''}${k.resepTotal ? ' · resep ' + u.rp(k.resepTotal) + (k.resepTotal === x.total ? ' ✓' : '') : ''}</span>`),
+            x.kasirDoctorFee ? '<span class="flag flag-low">Kasir sudah mencatat pemeriksaan dokter</span>' : '',
+            ...x.db.map((t) => `<span class="flag flag-db">Sudah tercatat ${u.esc(t.id)}: ${u.esc(t.items.join(', '))}</span>`),
+            x.dbDoctorFee ? '<span class="flag flag-low">Biaya dokter sudah ada di database</span>' : '',
+            x.include && x.problems.length ? `<span class="flag flag-zero">${u.esc(x.problems.join(' '))}</span>` : ''
+          ].filter(Boolean).join(' ') || '<span class="muted">—</span>'
+        }
+      ],
+      rows: rx.onlyFlagged ? P.rows.filter(flagged) : P.rows,
+      noPaging: true,
+      sortable: false,
+      cards: true,
+      rowClass: (x) => ['rx-row', x.zero ? 'rx-zero' : x.low ? 'rx-low' : '', x.kasir.length || x.db.length ? 'rx-dup' : '', x.include ? '' : 'rx-off'].join(' '),
+      empty: rx.doctors.size ? 'Tidak ada resep pada filter ini.' : 'Centang minimal satu dokter.'
+    });
+
+    bodyEl.addEventListener('change', (e) => {
+      const t = e.target;
+      if (t.dataset.doc !== undefined) {
+        if (t.checked) rx.doctors.add(t.dataset.doc);
+        else rx.doctors.delete(t.dataset.doc);
+      } else if (t.dataset.docmap !== undefined) {
+        rx.docMap[t.dataset.docmap] = t.value;
+        if (t.value) rx.doctors.add(t.dataset.docmap);
+      } else if (t.hasAttribute('data-rxsvc')) {
+        rx.serviceId = t.value;
+      } else if (t.dataset.inc !== undefined) {
+        const code = t.dataset.inc;
+        rx.included.delete(code);
+        rx.excluded.delete(code);
+        (t.checked ? rx.included : rx.excluded).add(code);
+      } else if (t.hasAttribute('data-rx-only')) {
+        rx.onlyFlagged = t.checked;
+      } else return;
+      rerender();
+    });
+    bodyEl.addEventListener('click', async (e) => {
+      const b = e.target.closest('[data-rx]');
+      if (!b) return;
+      if (b.dataset.rx === 'create-fee') {
+        try {
+          const s = await NP.svc.save({
+            id: '', code: '', name: 'Biaya Pemeriksaan Dokter', category: 'Pemeriksaan dokter', unit: 'KLINIK', price: 100000, active: true, notes: 'Dibuat dari impor penebusan resep',
+            shares: [{ type: 'unit', target: 'KLINIK', mode: 'remainder', value: 0 }, { type: 'role', target: 'dokter', mode: 'nominal', value: 0 }], doctorShares: [], overrides: []
+          });
+          rx.serviceId = s.id;
+          ui.toast('Tindakan "Biaya Pemeriksaan Dokter" dibuat. Atur bagian jasa dokter di Master Tindakan sebelum mengimpor.');
+        } catch (err) {
+          ui.toast(err.message, 'error');
+        }
+        rerender();
+      }
+      if (b.dataset.rx === 'import') {
+        const n = P.transactions.length;
+        const ok = await ui.confirm({
+          title: 'Impor biaya pemeriksaan dokter',
+          html: `Impor <b>${u.num(n)} biaya pemeriksaan dokter</b> (${u.rp(S.gross)}) dari <b>${u.esc(rx.file)}</b> sebagai tindakan "${u.esc(service.name)}"?${S.low - S.zero > 0 ? `<br><small>${u.num(P.rows.filter((x) => x.include && x.low).length)} di antaranya bernilai di bawah Rp100.000.</small>` : ''}`,
+          okLabel: 'Impor sekarang'
+        });
+        if (!ok) return;
+        try {
+          const res = await ui.busy('Mengimpor ' + n + ' biaya dokter…', (msg) => NP.trx.bulkSave(P.transactions, 'Impor resep ' + rx.file, (i, k) => msg('Mengimpor ' + i + '/' + k + '…')));
+          ui.toast(u.num(res.created.length) + ' biaya dokter diimpor (' + u.rp(res.gross) + ')' + (res.skipped.length ? ', ' + res.skipped.length + ' dilewati karena sudah ada' : '') + '.');
+        } catch (err) {
+          ui.toast(err.message, 'error');
+        }
+        rerender();
       }
     });
   }

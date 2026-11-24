@@ -673,6 +673,51 @@ async function step(name, fn) {
     await page.fill('#an-q', '');
     await page.click('.seg-btn[data-group=ALL]');
   });
+  await step('impor biaya dokter dari file resep: pilih dokter, tandai pasien sama & service < Rp100.000', async () => {
+    const XLSX = require(path.join(ROOT, 'vendor', 'xlsx.full.min.js'));
+    const rf = require('./support/resep-fixture.js');
+    const rxFile = rf.writeXlsx(XLSX, path.join(require('os').tmpdir(), 'penebusan-resep-uji.xlsx'), { year: +prevMonth.slice(0, 4), month: +prevMonth.slice(5), doctor: 'dr. Siti Rahmawati' });
+    await go('bulk?tab=resep');
+    const [fc] = await Promise.all([page.waitForEvent('filechooser'), page.click('[data-rx=pick]')]);
+    await fc.setFiles(rxFile);
+    await page.waitForSelector('#rx-table tbody tr');
+    // dokter yang cocok dengan Data Karyawan otomatis dicentang; dokter luar tidak
+    assert.ok(await page.locator('[data-doc="dr. Siti Rahmawati"]').isChecked());
+    assert.ok(!(await page.locator('[data-doc="Puskesmas Contoh"]').isChecked()));
+    const sid = await ev(async () => (await NP.db.all('employees')).find((e) => e.name === 'dr. Siti Rahmawati').id);
+    assert.strictEqual(await page.inputValue('[data-docmap="dr. Siti Rahmawati"]'), sid);
+    assert.ok(await page.inputValue('[data-rxsvc]'), 'master tindakan pemeriksaan dokter disarankan otomatis');
+    assert.strictEqual(await page.locator('#rx-table tbody tr').count(), 7);
+    // penanda: 2 di bawah Rp100.000 (satu Rp0), 3 pasien sama dengan file kasir yang dimuat di tab POS
+    assert.strictEqual(await page.locator('#rx-table tr.rx-low, #rx-table tr.rx-zero').count(), 2);
+    assert.strictEqual(await page.locator('#rx-table tr.rx-zero input[data-inc]').isDisabled(), true);
+    assert.strictEqual(await page.locator('#rx-table tr.rx-dup').count(), 3);
+    assert.ok(/Kasir SIN-/.test(await page.locator('#rx-table tr.rx-dup').first().innerText()));
+    await page.check('[data-rx-only]');
+    await page.waitForFunction(() => document.querySelectorAll('#rx-table tbody tr').length === 4);
+    await page.uncheck('[data-rx-only]');
+    await page.waitForFunction(() => document.querySelectorAll('#rx-table tbody tr').length === 7);
+    // dokter luar ikut dicentang → baris bertambah, lalu dilepas lagi
+    await page.check('[data-doc="Puskesmas Contoh"]');
+    await page.waitForFunction(() => document.querySelectorAll('#rx-table tbody tr').length === 9);
+    await page.uncheck('[data-doc="Puskesmas Contoh"]');
+    await page.waitForFunction(() => document.querySelectorAll('#rx-table tbody tr').length === 7);
+    const n = await page.locator('#rx-table input[data-inc]:checked').count();
+    assert.ok(n >= 4, 'resep yang dicentang: ' + n);
+    assert.ok(new RegExp('Impor ' + n + ' biaya dokter').test(await page.locator('[data-rx=import]').innerText()));
+    await page.click('[data-rx=import]');
+    await modalBtn('Impor sekarang').click();
+    await waitToast(/biaya dokter diimpor/);
+    const got = await ev(async (id) => {
+      const ts = (await NP.db.all('transactions')).filter((t) => t.externalRef && t.externalRef.startsWith('RESEP:'));
+      return { n: ts.length, docs: [...new Set(ts.map((t) => t.items[0].performers.dokter))], low: ts.filter((t) => t.items[0].price < 100000).length, noteOk: ts.every((t) => /Biaya pemeriksaan dokter/.test(t.note)), id };
+    }, sid);
+    assert.deepStrictEqual([got.n, got.docs, got.noteOk], [n, [sid], true]);
+    assert.strictEqual(got.low, 1, 'Rp50.000 ikut diimpor (ditandai, bukan dilewati)');
+    // impor ulang: semua sudah pernah diimpor
+    await page.waitForSelector('[data-rx=import][disabled]');
+    assert.ok(/Sudah pernah diimpor/.test(await page.locator('#rx-table').innerText()));
+  });
   await step('input tindakan di iPad: kolom tanggal tidak menimpa nama pasien', async () => {
     for (const vp of [{ width: 1180, height: 820 }, { width: 820, height: 1180 }, { width: 1366, height: 900 }]) {
       await page.setViewportSize(vp);
