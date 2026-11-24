@@ -28,6 +28,7 @@ GitHub: source code, CI (uji otomatis), backup terenkripsi terjadwal, deploy Git
 | Tanpa secret/service role di frontend | Hanya anon key; `scripts/build-env.mjs` menolak service role/secret key |
 | Backup berkala | Backup harian Supabase + `.github/workflows/db-backup.yml` (dump terenkripsi) |
 | Migrasi SQL | `supabase/migrations/` + `supabase/seed.sql` |
+| Input bulanan / impor POS tanpa duplikasi | `create_service_transactions_bulk` (satu transaksi database) + `service_transactions.external_ref` unik (nomor struk POS) |
 | Konfigurasi non-sensitif di file environment | `.env` → `js/env.js` |
 | GitHub bukan database transaksi | GitHub hanya menyimpan kode & backup terenkripsi |
 

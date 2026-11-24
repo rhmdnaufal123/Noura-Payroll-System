@@ -180,6 +180,9 @@ details.panel[open] summary { margin-bottom: 10px; }
 .field-inline { display: inline-flex; align-items: center; gap: 8px; font-size: 13px; font-weight: 600; color: var(--text-2); }
 input, select, textarea { font-family: inherit; font-size: 14px; color: var(--text); background: var(--surface); border: 1px solid var(--border-strong); border-radius: 10px; padding: 9px 12px; min-height: 40px; width: 100%; transition: border-color .15s, box-shadow .15s; }
 textarea { resize: vertical; min-height: 64px; }
+/* Safari iPad/iPhone: kolom tanggal punya lebar bawaan sehingga meluber ke kolom sebelahnya. */
+input[type="date"], input[type="month"], input[type="time"], input[type="datetime-local"] { -webkit-appearance: none; appearance: none; display: block; min-width: 0; max-width: 100%; line-height: 1.4; text-align: left; }
+input::-webkit-date-and-time-value { text-align: left; min-height: 1.4em; }
 input:focus, select:focus, textarea:focus { outline: none; border-color: var(--primary); box-shadow: 0 0 0 3px color-mix(in srgb, var(--primary) 20%, transparent); }
 input[readonly], input:disabled, select:disabled { background: var(--surface-2); color: var(--muted); }
 input[type="checkbox"], input[type="radio"] { width: 18px; height: 18px; min-height: 0; accent-color: var(--primary); padding: 0; flex: none; }

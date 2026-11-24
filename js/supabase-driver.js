@@ -160,7 +160,7 @@
             }))
           }));
           const doc = {
-            id: t.id, date: t.trx_date, patient: t.patient_name, patientCode: t.patient_code, note: t.note, status: t.status, cancelReason: t.cancel_reason,
+            id: t.id, date: t.trx_date, patient: t.patient_name, patientCode: t.patient_code, note: t.note, externalRef: t.external_ref || null, status: t.status, cancelReason: t.cancel_reason,
             cancelledAt: ts(t.cancelled_at), cancelledBy: t.cancelled_by_name || '-', items: its, corrections: t.corrections || [],
             adjustments: (allocBy.get('adj:' + t.id) || []).sort((a, b) => ts(a.created_at) - ts(b.created_at)).map((a) => ({
               id: a.id, employeeId: a.recipient_employee_id, amount: num(a.amount), unit: a.recipient_unit, date: a.adj_date, kind: a.adj_kind, note: a.adj_note, by: a.adj_by, payroll: pay(a)
@@ -369,6 +369,11 @@
       saveService: (s) => rpc('save_service', { p: { id: s.id || null, name: s.name, category: s.category, unit: s.unit, price: s.price, active: s.active, notes: s.notes || '', shares: s.shares, overrides: s.overrides || [] } }),
       setServiceActive: (id, active) => rpc('set_service_active', { p_id: id, p_active: active }),
       deleteService: (id) => rpc('delete_service', { p_id: id }),
+      /** Simpan banyak transaksi dalam satu transaksi database (input bulanan / impor POS). */
+      bulkSaveTransactions: (list, source) =>
+        rpc('create_service_transactions_bulk', {
+          p: { source: source || '', transactions: list.map((d) => ({ date: d.date, patient: d.patient || '', patientCode: d.patientCode || '', note: d.note || '', externalRef: d.externalRef || null, items: d.items })) }
+        }),
       async saveTransaction(draft, opt) {
         opt = opt || {};
         const p = { date: draft.date, patient: draft.patient || '', patientCode: draft.patientCode || '', note: draft.note || '', items: draft.items };

@@ -164,9 +164,10 @@
         const n = await t.nextNumber('trx-' + ym);
         rec = {
           id: NP.state.settings.numbering.transaction + '-' + ym + '-' + String(n).padStart(4, '0'),
-          date: draft.date, patient: draft.patient || '', patientCode: draft.patientCode || '', note: draft.note || '',
+          date: draft.date, patient: draft.patient || '', patientCode: draft.patientCode || '', note: draft.note || '', externalRef: draft.externalRef || null,
           items, status: 'active', adjustments: [], createdAt: Date.now(), createdBy: usr ? usr.username : 'sistem'
         };
+        if (rec.externalRef && (await t.all('transactions')).some((x) => x.externalRef === rec.externalRef && x.status === 'active')) throw new Error('Data ' + rec.externalRef + ' sudah pernah disimpan.');
         rec.totals = trx.totals(items);
         await t.put('transactions', rec);
         await t.put('auditLog', NP.audit.entry('trx.create', 'transaction', rec.id, 'Transaksi baru ' + items.length + ' tindakan, total ' + u.rp(rec.totals.gross)));
@@ -202,6 +203,56 @@
         (chk.locked ? 'KOREKSI TERKUNCI (otorisasi ' + opt.auth.by + '): ' + opt.auth.note + ' | ' : 'Ubah transaksi | ') + 'Sebelum: ' + before.items + ' = ' + u.rp(before.total) + ' (' + before.date + ') → Sesudah: ' + after.items + ' = ' + u.rp(after.total) + ' (' + after.date + ')'));
       return rec;
     });
+  };
+
+  /**
+   * Simpan banyak transaksi sekaligus (input bulanan / impor POS).
+   * Supabase: satu transaksi database (semua tersimpan atau tidak sama sekali).
+   * Transaksi ber-externalRef yang sudah ada dilewati agar impor ulang tidak menggandakan data.
+   * @returns {{created:string[], skipped:string[], gross:number}}
+   */
+  trx.bulkSave = async function (list, source, onProgress) {
+    if (!list || !list.length) throw new Error('Tidak ada transaksi untuk disimpan.');
+    for (const d of list) {
+      if (!d.date) throw new Error('Tanggal transaksi wajib diisi.');
+      if (d.date > u.todayISO()) throw new Error('Tanggal ' + u.fmtDate(d.date) + ' melebihi hari ini.');
+      if (!d.items || !d.items.length) throw new Error('Transaksi ' + (d.externalRef || u.fmtDate(d.date)) + ' tidak memiliki tindakan.');
+    }
+    if (NP.db.remote) {
+      const out = [];
+      const res = { created: [], skipped: [], gross: 0 };
+      // dipecah per 200 transaksi agar permintaan tidak terlalu besar
+      for (let i = 0; i < list.length; i += 200) out.push(list.slice(i, i + 200));
+      for (const [n, chunk] of out.entries()) {
+        onProgress && onProgress(n * 200, list.length);
+        const r = await NP.db.bulkSaveTransactions(chunk, source);
+        res.created.push(...(r.created || []));
+        res.skipped.push(...(r.skipped || []));
+        res.gross += Number(r.gross) || 0;
+      }
+      return res;
+    }
+    const existing = new Set((await NP.db.all('transactions')).filter((t) => t.status === 'active' && t.externalRef).map((t) => t.externalRef));
+    const res = { created: [], skipped: [], gross: 0 };
+    for (const [i, d] of list.entries()) {
+      onProgress && onProgress(i, list.length);
+      if (d.externalRef && existing.has(d.externalRef)) {
+        res.skipped.push(d.externalRef);
+        continue;
+      }
+      try {
+        const rec = await trx.save(d);
+        res.created.push(rec.id);
+        res.gross += rec.totals.gross;
+        if (d.externalRef) existing.add(d.externalRef);
+      } catch (e) {
+        e.message = 'Data ke-' + (i + 1) + ' (' + (d.externalRef || u.fmtDate(d.date)) + '): ' + e.message + (res.created.length ? ' — ' + res.created.length + ' transaksi sebelumnya sudah tersimpan.' : '');
+        e.partial = res;
+        throw e;
+      }
+    }
+    if (res.created.length) await NP.audit.log('trx.bulk', 'transaction', res.created[0], 'Input massal (' + (source || 'input bulanan') + '): ' + res.created.length + ' transaksi tersimpan, ' + res.skipped.length + ' dilewati, total ' + u.rp(res.gross));
+    return res;
   };
 
   /** Batalkan transaksi. Transaksi terkunci memerlukan otorisasi (opt.auth) dan menghasilkan adjustment negatif. */
@@ -331,10 +382,10 @@
       ${editState && editState.draftRuns.length ? `<div class="alert alert-info">${ui.icon('info')}<div>Transaksi ini termasuk dalam draft penggajian ${editState.draftRuns.join(', ')}. Setelah diubah, draft tersebut perlu dihitung ulang.</div></div>` : ''}
       <div class="input-layout">
         <form class="card input-form" novalidate>
-          <div class="grid-3">
-            <label class="field"><span>Tanggal transaksi <b class="req">*</b></span><input type="date" name="date" max="${u.todayISO()}" value="${editing ? editing.date : u.todayISO()}"></label>
-            <label class="field"><span>Nama pasien (opsional)</span><input name="patient" value="${u.esc(editing ? editing.patient : '')}" maxlength="80"></label>
-            <label class="field"><span>Kode pasien / No. RM (opsional)</span><input name="patientCode" value="${u.esc(editing ? editing.patientCode : '')}" maxlength="30"></label>
+          <div class="grid-3 trx-head">
+            <label class="field f-date"><span>Tanggal transaksi <b class="req">*</b></span><input type="date" name="date" max="${u.todayISO()}" value="${editing ? editing.date : u.todayISO()}"></label>
+            <label class="field f-name"><span>Nama pasien (opsional)</span><input name="patient" value="${u.esc(editing ? editing.patient : '')}" maxlength="80"></label>
+            <label class="field f-rm"><span>No. RM / kode pasien (opsional)</span><input name="patientCode" value="${u.esc(editing ? editing.patientCode : '')}" maxlength="30"></label>
           </div>
           <h4 class="sec-title">Daftar tindakan</h4>
           <div id="item-rows"></div>

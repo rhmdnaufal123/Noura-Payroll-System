@@ -55,6 +55,8 @@
   };
 
   const SERVICE_CATEGORIES = [
+    'Dokter Umum & Bidan',
+    'Homecare',
     'Pemeriksaan laboratorium sederhana',
     'Pemeriksaan kesehatan',
     'Pemeriksaan dokter',
@@ -65,6 +67,15 @@
     'Penjualan produk',
     'Pelayanan lainnya'
   ];
+
+  /** Kelompok analisis tindakan: Homecare, Dokter Umum & Bidan (seluruh tindakan medis/kebidanan), Lainnya. */
+  const SERVICE_GROUPS = { dokter_bidan: 'Dokter Umum & Bidan', homecare: 'Homecare', lainnya: 'Farmasi & Lainnya' };
+  const NON_CLINICAL = ['Pelayanan farmasi', 'Penjualan produk', 'Pelayanan lainnya'];
+  function serviceGroup(category, name) {
+    if (category === 'Homecare' || /(^|\s)(HC|HOMECARE|HOME CARE)(\s|$)/i.test(String(name || ''))) return 'homecare';
+    if (NON_CLINICAL.includes(category)) return 'lainnya';
+    return 'dokter_bidan';
+  }
 
   const EMP_STATUS = { aktif: 'Aktif', nonaktif: 'Tidak Aktif', cuti: 'Cuti', resign: 'Mengundurkan Diri' };
 
@@ -98,7 +109,7 @@
 
   NP.C = {
     UNITS, EMP_UNITS, POSITIONS, ALL_POSITIONS, DEPARTMENTS, ROLES, ADMIN_POSITIONS, HEALTH_POSITIONS,
-    roleOfPosition, SHARE_CATS, SERVICE_CATEGORIES, EMP_STATUS, PAY_SCHEMES, SCHEMES_BY_ROLE, RATE_LABELS, PTKP_LIST
+    roleOfPosition, SHARE_CATS, SERVICE_CATEGORIES, SERVICE_GROUPS, serviceGroup, EMP_STATUS, PAY_SCHEMES, SCHEMES_BY_ROLE, RATE_LABELS, PTKP_LIST
   };
   if (typeof module !== 'undefined' && module.exports) module.exports = NP;
 })(typeof globalThis !== 'undefined' ? globalThis : window);

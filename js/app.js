@@ -13,7 +13,9 @@
     { key: 'employees', label: 'Data Karyawan', icon: 'users', perm: 'employees.view' },
     { key: 'services', label: 'Master Tindakan', icon: 'medical', perm: 'services.view' },
     { key: 'input', label: 'Input Tindakan', icon: 'input', perm: 'trx.create' },
+    { key: 'bulk', label: 'Input Bulanan', icon: 'calendar', perm: 'trx.create' },
     { key: 'transactions', label: 'Riwayat Transaksi', icon: 'history', perm: 'trx.view' },
+    { key: 'analysis', label: 'Analisis Tindakan', icon: 'report', perm: 'analysis.view' },
     { key: 'revenue', label: 'Pembagian Pendapatan', icon: 'pie', perm: 'revenue.view' },
     { key: 'income', label: 'Rekap Jasa Karyawan', icon: 'recap', perm: 'income.view' },
     { key: 'payroll', label: 'Penggajian', icon: 'wallet', perm: 'payroll.run' },
@@ -375,7 +377,7 @@
     }
     startApp();
     NP.db.subscribe(() => {
-      const busy = document.querySelector('.modal-backdrop, .page-input, .page-generate');
+      const busy = document.querySelector('.modal-backdrop, .busy-overlay, .page-input, .page-bulk, .page-generate');
       if (!busy) NP.refresh();
       else ui.toast('Data diperbarui dari perangkat lain. Muat ulang halaman untuk melihat perubahan terbaru.', 'info');
     });

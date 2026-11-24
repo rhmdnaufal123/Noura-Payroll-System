@@ -367,6 +367,50 @@ const today = () => new Date(Date.now() + 7 * 3600000).toISOString().slice(0, 10
     await rejects(as(U.admin, (c) => c.query("select public.next_counter('employee')")), /permission denied/);
   });
 
+  console.log('Input bulanan & impor POS');
+  await test('kategori Dokter Umum & Bidan dan Homecare diterima; kategori asing ditolak', async () => {
+    await as(U.admin, async (c) => {
+      S.suntik = await rpc(c, 'save_service', { name: 'Suntik Multivitamin', category: 'Dokter Umum & Bidan', unit: 'APT', price: 220000, shares: [Un('APT', 'nominal', 170000), R('bidan', 'nominal', 50000)] });
+      S.infusHc = await rpc(c, 'save_service', { name: 'Infus Multivitamin HC', category: 'Homecare', unit: 'APT', price: 380000, shares: [Un('APT', 'remainder', 0)] });
+    });
+    await rejects(as(U.admin, (c) => rpc(c, 'save_service', { name: 'Asing', category: 'Kategori Asing', unit: 'APT', price: 1000, shares: [Un('APT', 'nominal', 1000)] })), /category_check|check constraint/);
+  });
+  const bulk = (refs, extra) => ({
+    source: 'uji impor',
+    transactions: refs.map((ref, i) => Object.assign({ date: '2025-01-' + String(i + 2).padStart(2, '0'), patient: 'Pasien ' + ref, externalRef: ref, note: 'Impor POS ' + ref,
+      items: [{ serviceId: S.suntik, qty: 1, price: 220000, performers: { bidan: E.bidan } }, { serviceId: S.infusHc, qty: 2, price: 380000, performers: {} }] }, extra && extra[i]))
+  });
+  await test('impor massal: satu transaksi database; struk yang sama dilewati saat diimpor ulang', async () => {
+    const r1 = await as(U.ops, (c) => rpc(c, 'create_service_transactions_bulk', bulk(['SIN-1', 'SIN-2', 'SIN-3'])));
+    assert.strictEqual(r1.created.length, 3);
+    assert.deepStrictEqual(r1.skipped, []);
+    assert.strictEqual(Number(r1.gross), 3 * (220000 + 760000));
+    const r2 = await as(U.ops, (c) => rpc(c, 'create_service_transactions_bulk', bulk(['SIN-2', 'SIN-3', 'SIN-4'])));
+    assert.deepStrictEqual(r2.skipped, ['SIN-2', 'SIN-3']);
+    assert.strictEqual(r2.created.length, 1);
+    const n = (await su("select count(*)::int n from public.service_transactions where external_ref like 'SIN-%'")).rows[0].n;
+    assert.strictEqual(n, 4);
+    const hc = (await su("select sum(i.qty)::int q, sum(i.gross)::int g from public.service_transaction_items i join public.service_transactions t on t.id = i.transaction_id where t.external_ref like 'SIN-%' and i.category = 'Homecare'")).rows[0];
+    assert.deepStrictEqual(hc, { q: 8, g: 3040000 }, 'kategori item tersimpan sebagai snapshot');
+    const audit = (await su("select count(*)::int n from public.audit_logs where action = 'trx.bulk'")).rows[0].n;
+    assert.strictEqual(audit, 2);
+  });
+  await test('impor massal gagal di tengah → tidak ada yang tersimpan (atomik); viewer ditolak', async () => {
+    const before = (await su('select count(*)::int n from public.service_transactions')).rows[0].n;
+    await rejects(as(U.ops, (c) => rpc(c, 'create_service_transactions_bulk', bulk(['SIN-5', 'SIN-6'], [null, { items: [{ serviceId: S.suntik, qty: 1, price: 220000, performers: {} }] }]))), /Data ke-2 \(SIN-6\).*Bidan belum dipilih/);
+    await rejects(as(U.ops, (c) => rpc(c, 'create_service_transactions_bulk', bulk(['SIN-7'], [{ date: '2999-01-01' }]))), /melebihi hari ini/);
+    await rejects(as(U.view, (c) => rpc(c, 'create_service_transactions_bulk', bulk(['SIN-8']))), /Akses ditolak/);
+    assert.strictEqual((await su('select count(*)::int n from public.service_transactions')).rows[0].n, before);
+  });
+  await test('struk yang sama tidak dapat disimpan dua kali lewat input tunggal; boleh lagi setelah dibatalkan', async () => {
+    const one = bulk(['SIN-1']).transactions[0];
+    await rejects(as(U.ops, (c) => rpc(c, 'create_service_transaction', one)), /SIN-1 sudah pernah disimpan/);
+    const id = (await su("select id from public.service_transactions where external_ref = 'SIN-1'")).rows[0].id;
+    await as(U.fin, (c) => rpc(c, 'cancel_service_transaction', id, 'salah impor', null));
+    const r = await as(U.ops, (c) => rpc(c, 'create_service_transactions_bulk', bulk(['SIN-1'])));
+    assert.strictEqual(r.created.length, 1);
+  });
+
   await pool.end();
   console.log('\n' + passed + ' lulus, ' + failures.length + ' gagal');
   process.exit(failures.length ? 1 : 0);

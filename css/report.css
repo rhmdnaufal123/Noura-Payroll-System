@@ -15,3 +15,25 @@
 .kv-list .kv.muted b { color: var(--muted); }
 .kv-list .kv span small { display: block; color: var(--muted); font-size: 11px; }
 @media (max-width: 760px) { .recon-flow > i { display: none; } .recon-flow > div { flex: 1 1 45%; } }
+/* ===== Analisis tindakan ===== */
+.an-filters .filters { margin-bottom: 10px; }
+.an-filters .search-box { flex: 1 1 260px; }
+.an-filters .seg { flex-wrap: wrap; }
+.an-filters .seg-btn { display: inline-flex; align-items: center; }
+.an-filters .seg-btn.active .dot { box-shadow: 0 0 0 2px #fff; }
+.an-groups { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 12px; margin-bottom: 18px; }
+.an-group { display: flex; flex-direction: column; align-items: flex-start; gap: 4px; text-align: left; cursor: pointer; font: inherit; color: inherit; margin: 0; border: 1px solid var(--border); border-left: 4px solid var(--gc); }
+.an-group.active { box-shadow: 0 0 0 2px var(--gc); }
+.an-group-name { display: inline-flex; align-items: center; font-weight: 700; font-size: 13px; color: var(--text-2); }
+.an-group b { font-size: 24px; font-variant-numeric: tabular-nums; }
+.an-group b small { font-size: 13px; font-weight: 500; color: var(--muted); }
+.an-group > span:not(.an-group-name) { font-size: 13px; color: var(--text-2); }
+.delta { font-weight: 700; font-size: 12px; }
+.delta.up { color: var(--primary-ink, var(--primary)); }
+.delta.down { color: var(--danger); }
+.delta.flat { color: var(--muted); }
+.grp-tag { display: inline-flex; align-items: center; font-size: 12px; color: var(--text-2); white-space: nowrap; }
+.an-bar { display: inline-block; min-width: 64px; padding: 2px 6px; border-radius: 6px; font-variant-numeric: tabular-nums; background: linear-gradient(90deg, color-mix(in srgb, var(--gc) 22%, transparent) var(--w), transparent var(--w)); }
+.an-two { align-items: start; }
+.an-two .card { margin-bottom: 18px; }
+@media (max-width: 1400px) { .an-two { grid-template-columns: minmax(0, 1fr); } }
