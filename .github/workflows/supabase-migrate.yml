@@ -1,0 +1,26 @@
+# Terapkan migrasi SQL & seed ke proyek Supabase (dijalankan manual).
+# Secrets: SUPABASE_ACCESS_TOKEN, SUPABASE_DB_PASSWORD. Variable: SUPABASE_PROJECT_REF.
+name: Migrasi Supabase
+on:
+  workflow_dispatch:
+    inputs:
+      deploy_function:
+        description: 'Deploy juga Edge Function admin-users'
+        type: boolean
+        default: true
+
+jobs:
+  migrate:
+    runs-on: ubuntu-latest
+    env:
+      SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
+      SUPABASE_DB_PASSWORD: ${{ secrets.SUPABASE_DB_PASSWORD }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: supabase/setup-cli@v1
+        with:
+          version: 2.20.5
+      - run: supabase link --project-ref "${{ vars.SUPABASE_PROJECT_REF }}" --password "$SUPABASE_DB_PASSWORD"
+      - run: supabase db push --include-seed --password "$SUPABASE_DB_PASSWORD"
+      - if: ${{ inputs.deploy_function }}
+        run: supabase functions deploy admin-users --project-ref "${{ vars.SUPABASE_PROJECT_REF }}"

@@ -163,7 +163,7 @@
           ${NAV.map((n, i) => (NP.sec.can(n.perm) ? `<a class="nav-item" href="#/${n.key}" data-page="${n.key}">${ui.icon(n.icon)}<span>${n.label}</span><small>${i + 1}</small></a>` : '')).join('')}
         </nav>
         <div class="sidebar-foot">
-          <div class="storage-note">${ui.icon('lock')}<span>Penyimpanan lokal perangkat ini</span></div>
+          <div class="storage-note">${ui.icon('lock')}<span>${NP.db.remote ? 'Database pusat Supabase' : 'Penyimpanan lokal perangkat ini'}</span></div>
         </div>
       </aside>
       <div class="nav-scrim"></div>
@@ -234,7 +234,7 @@
           label: 'Simpan', cls: 'btn-primary', onClick: async (m) => {
             const q = (n) => m.el.querySelector(`[name=${n}]`).value;
             const err = m.el.querySelector('.form-error');
-            const ok = await NP.sec.verify(usr.username, q('old'));
+            const ok = await NP.sec.verify(NP.db.remote ? usr.email : usr.username, q('old'));
             if (!ok) {
               err.hidden = false;
               err.textContent = 'Kata sandi saat ini salah.';
@@ -320,6 +320,7 @@
       if (theme) document.documentElement.setAttribute('data-theme', theme);
     } catch (_) {}
     if (NP.ENV && NP.ENV.artifact) document.body.classList.add('env-artifact');
+    if (NP.remoteConfigured && NP.remoteConfigured() && !(NP.ENV && NP.ENV.artifact)) return bootRemote();
     try {
       await NP.db.open();
     } catch (e) {
@@ -342,6 +343,45 @@
         hint: defaultAdmin ? 'Akun awal: <b>admin</b> / <b>admin123</b> (segera ganti). Akun demo: keuangan/keuangan123, operasional/operasional123, viewer/viewer123.' : ''
       });
     }
+    startApp();
+  }
+
+  function fatal(title, html) {
+    document.getElementById('app').innerHTML = `<div class="fatal"><h2>${u.esc(title)}</h2>${html}</div>`;
+  }
+
+  /** Mode Supabase: database terpusat wajib; tidak ada cadangan penyimpanan lokal. */
+  async function bootRemote() {
+    try {
+      NP.db = NP.createSupabaseDriver();
+    } catch (e) {
+      return fatal('Supabase tidak dapat dimuat', `<p>${u.esc(e.message)}</p><p>Aplikasi dikonfigurasi memakai Supabase sehingga tidak berjalan tanpa koneksi ke database pusat.</p>`);
+    }
+    let usr = null;
+    try {
+      usr = await NP.sec.restore();
+    } catch (e) {
+      console.warn(e);
+    }
+    if (!usr) usr = await NP.sec.showLogin({});
+    try {
+      await NP.loadSettings();
+      const s = await NP.db.get('settings', 'app');
+      if (!s || !s.numbering) throw new Error('Pengaturan awal belum ada. Jalankan supabase/seed.sql pada proyek Supabase.');
+      await NP.loadComponents();
+    } catch (e) {
+      console.error(e);
+      return fatal('Database Supabase belum siap', `<p>${u.esc(e.message)}</p><p>Pastikan seluruh file di <code>supabase/migrations</code> dan <code>supabase/seed.sql</code> sudah dijalankan.</p>`);
+    }
+    startApp();
+    NP.db.subscribe(() => {
+      const busy = document.querySelector('.modal-backdrop, .page-input, .page-generate');
+      if (!busy) NP.refresh();
+      else ui.toast('Data diperbarui dari perangkat lain. Muat ulang halaman untuk melihat perubahan terbaru.', 'info');
+    });
+  }
+
+  function startApp() {
     renderShell();
     renderBanners();
     NP.sec.startAutoLock();

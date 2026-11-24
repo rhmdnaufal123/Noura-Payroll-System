@@ -68,11 +68,12 @@
     return t;
   };
 
-  /** Jumlah yang sudah "dibayar/terkunci" per karyawan untuk transaksi (share terkunci + seluruh adjustment). */
+  /** Jumlah yang sudah dibayar/terjadwal per karyawan untuk transaksi terkunci.
+   * Invarian: setelah setiap koreksi, bagian awal yang dibayar + seluruh adjustment = bagian
+   * terkunci saat ini, sehingga cukup menjumlahkan bagian terkunci (adjustment tidak ditambah lagi). */
   function settledByEmployee(t) {
     const m = new Map();
     for (const { share } of trx.empShares(t)) if (share.payroll && share.payroll.state === 'locked') m.set(share.recipientId, (m.get(share.recipientId) || 0) + share.amount);
-    for (const a of t.adjustments || []) m.set(a.employeeId, (m.get(a.employeeId) || 0) + a.amount);
     return m;
   }
 
@@ -128,6 +129,7 @@
     if (!draft.date) throw new Error('Tanggal transaksi wajib diisi.');
     if (draft.date > u.todayISO()) throw new Error('Tanggal transaksi tidak boleh melebihi hari ini.');
     if (!draft.items || !draft.items.length) throw new Error('Minimal satu tindakan.');
+    if (NP.db.remote) return NP.db.saveTransaction(draft, opt);
     const services = new Map((await NP.db.all('services')).map((s) => [s.id, s]));
     const empMap = await NP.emp.map();
     const old = opt.editId ? await trx.get(opt.editId) : null;
@@ -206,6 +208,7 @@
   trx.cancel = async function (id, reason, opt) {
     opt = opt || {};
     if (!reason || reason.trim().length < 3) throw new Error('Alasan pembatalan wajib diisi.');
+    if (NP.db.remote) return NP.db.cancelTransaction(id, reason, opt);
     const usr = NP.sec.user();
     return NP.db.run(['transactions', 'auditLog', 'payrollRuns'], async (t) => {
       const cur = await t.get('transactions', id);

@@ -363,7 +363,7 @@
     ui.modal({
       title: isNew ? 'Tambah Pengguna' : 'Edit Pengguna ' + x.username,
       size: 'sm',
-      body: `<label class="field"><span>Nama pengguna</span><input name="username" value="${u.esc(x ? x.username : '')}" ${isNew ? '' : 'readonly'} autocomplete="off"></label>
+      body: `${NP.db.remote && isNew ? '<label class="field"><span>Email (untuk login)</span><input name="email" type="email" autocomplete="off"></label><p class="muted small">Akun dibuat di Supabase Auth melalui fungsi server admin-users.</p>' : `<label class="field"><span>Nama pengguna</span><input name="username" value="${u.esc(x ? x.username : '')}" ${isNew ? '' : 'readonly'} autocomplete="off"></label>`}
         <label class="field"><span>Nama lengkap</span><input name="name" value="${u.esc(x ? x.name : '')}"></label>
         <label class="field"><span>Hak akses</span><select name="role">${ui.options(Object.entries(NP.sec.ROLES).map(([k, r]) => [k, r.label]), x ? x.role : 'ops')}</select></label>
         ${isNew ? '<label class="field"><span>Kata sandi (min. 6 karakter)</span><input name="password" type="password" autocomplete="new-password"></label>' : `<label class="check"><input type="checkbox" name="active" ${x.active !== false ? 'checked' : ''}><span>Aktif</span></label>`}
@@ -379,7 +379,16 @@
               err.textContent = s;
             };
             const all = await NP.db.all('users');
-            if (isNew) {
+            if (isNew && NP.db.remote) {
+              if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(d.email || '')) return fail('Email tidak valid.');
+              if (!d.password || d.password.length < 8) return fail('Kata sandi minimal 8 karakter.');
+              if (!d.name) return fail('Nama lengkap wajib diisi.');
+              try {
+                await NP.db.adminUsers({ action: 'create', email: d.email, password: d.password, full_name: d.name, role: d.role });
+              } catch (e) {
+                return fail(e.message);
+              }
+            } else if (isNew) {
               if (!/^[a-z0-9._-]{3,20}$/i.test(d.username)) return fail('Nama pengguna 3–20 karakter (huruf, angka, titik, garis).');
               if (all.some((y) => y.username.toLowerCase() === d.username.toLowerCase())) return fail('Nama pengguna sudah dipakai.');
               if (!d.password || d.password.length < 6) return fail('Kata sandi minimal 6 karakter.');
@@ -407,7 +416,7 @@
     const s = NP.state.settings;
     const est = await NP.db.estimate();
     const counts = {};
-    for (const st of NP.db.STORES) counts[st] = (await NP.db.all(st)).length;
+    for (const st of NP.db.STORES) counts[st] = await NP.db.all(st).then((x) => x.length, () => '-');
     el.innerHTML = `
       <div class="grid-2">
         <div class="panel"><h3>${ui.icon('download')} Backup database</h3>
@@ -416,11 +425,14 @@
           <button class="btn btn-primary" data-b="dl">${ui.icon('download')}<span>Download Backup JSON</span></button>
           <label class="field" style="margin-top:14px"><span>Pengingat backup setiap (hari, 0 = nonaktif)</span><div class="inline"><input type="number" min="0" max="90" id="bk-days" value="${s.backup.reminderDays}"><button class="btn btn-ghost btn-sm" data-b="rem">Simpan</button></div></label>
         </div>
-        <div class="panel"><h3>${ui.icon('upload')} Restore database</h3>
+        ${NP.db.remote ? `<div class="panel"><h3>${ui.icon('archive')} Backup server Supabase</h3>
+          <p class="muted">Database pusat dicadangkan di sisi server: backup harian Supabase (dan Point-in-Time Recovery pada paket berbayar), serta workflow GitHub Actions <code>db-backup.yml</code> yang membuat dump terenkripsi secara terjadwal.</p>
+          <p class="muted">Restore dilakukan administrator database melalui Supabase Dashboard atau <code>psql</code> — tidak dari browser — agar data pusat tidak tertimpa secara tidak sengaja.</p>
+        </div>` : `<div class="panel"><h3>${ui.icon('upload')} Restore database</h3>
           <p class="muted">Pulihkan data dari file backup JSON. <b>Seluruh data saat ini akan diganti</b> dengan isi backup.</p>
           <label class="check"><input type="checkbox" id="bk-safety" checked><span>Unduh backup data saat ini sebelum restore</span></label>
           <button class="btn btn-danger" data-b="restore">${ui.icon('upload')}<span>Pilih file & Restore</span></button>
-        </div>
+        </div>`}
       </div>
       <h4 class="sec-title">Isi database saat ini</h4>
       <div class="grid-5 mini-stats">${Object.entries(counts).map(([k, v]) => `<div><span>${k}</span><b>${u.num(v)}</b></div>`).join('')}</div>
@@ -466,6 +478,10 @@
   }
 
   async function dataTab(el) {
+    if (NP.db.remote) {
+      el.innerHTML = `<div class="panel"><h3>Database pusat Supabase</h3><p class="muted">Data demonstrasi dan penghapusan massal tidak tersedia pada database produksi. Seluruh data dikelola melalui proses aplikasi yang tercatat di audit log.</p></div>`;
+      return;
+    }
     const emps = await NP.db.all('employees');
     const demoCount = (await Promise.all(['employees', 'services', 'transactions', 'payrollRuns', 'worklogs'].map((s) => NP.db.all(s)))).reduce((a, l) => a + l.filter((x) => x.demo).length, 0);
     el.innerHTML = `

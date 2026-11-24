@@ -81,7 +81,7 @@
           id: emp.id, name: emp.name, position: emp.position, department: emp.department, unit: emp.unit, primaryUnit: NP.emp.primaryUnit(emp),
           payScheme: emp.payScheme, payMethod: emp.payMethod, bankName: emp.bankName, bankAccountMasked: u.maskAccount(emp.bankAccount), bankHolder: emp.bankHolder || emp.name, startDate: emp.startDate
         },
-        serviceRefs: l.map((x) => ({ trxId: x.trxId, lineId: x.lineId, si: x.si })),
+        serviceRefs: l.map((x) => ({ trxId: x.trxId, lineId: x.lineId, si: x.si, allocId: x.allocId })),
         adjRefs: a.map((x) => ({ trxId: x.trxId, adjId: x.adjId })),
         earlierCount: l.filter((x) => x.earlier).length
       }));
@@ -153,10 +153,26 @@
     opt = opt || {};
     if (!run.employeeIds.length) throw new Error('Pilih minimal satu karyawan.');
     if (!run.start || !run.end || run.start > run.end) throw new Error('Rentang periode tidak valid.');
+    if (NP.db.remote) NP.db.invalidate();
     const data = await pr.loadData();
     const conf = pr.conflicts(data, run);
     const dup = run.employeeIds.filter((id) => conf.has(id));
     if (dup.length) throw new Error('Karyawan berikut sudah memiliki penggajian pada periode yang beririsan: ' + dup.map((id) => (data.emps.get(id) || {}).name + ' (' + conf.get(id) + ')').join(', '));
+    if (NP.db.remote) {
+      // Slip dihitung di aplikasi; server memverifikasi jasa, total, dan mengunci jasa secara atomik.
+      const res = pr.compute(run, data);
+      const id = await NP.db.payrollSaveDraft({
+        id: run.id || null, period: run.period, start: run.start, end: run.end, payDate: run.payDate, unit: run.unit || 'ALL', includeEarlier: !!run.includeEarlier,
+        notes: run.notes || '', note: opt.note || '', totals: res.totals,
+        slips: res.slips.map((x) => ({
+          employeeId: x.employeeId, earnings: x.earnings, deductions: x.deductions, totals: x.totals, allocation: x.allocation, split: x.split, employer: x.employer,
+          taxInfo: x.taxInfo, warnings: x.warnings, serviceDetail: x.serviceDetail, serviceCount: x.serviceCount, serviceQty: x.serviceQty,
+          inputs: { normalized: x.inputs, overrides: (run.inputs || {})[x.employeeId] || {} },
+          serviceRefs: x.serviceRefs.map((r) => r.allocId), adjRefs: x.adjRefs.map((r) => r.adjId)
+        }))
+      });
+      return pr.get(id);
+    }
     const usr = NP.sec.user();
     return NP.db.run(['payrollRuns', 'transactions', 'counters', 'auditLog'], async (t) => {
       const isNew = !run.id;
@@ -190,6 +206,10 @@
   };
 
   pr.approve = async function (id, note) {
+    if (NP.db.remote) {
+      await NP.db.payrollApprove(id);
+      return pr.get(id);
+    }
     const run = await pr.get(id);
     if (!run || run.status !== 'draft') throw new Error('Hanya draft yang dapat disetujui.');
     if (run.stale) throw new Error('Draft perlu dihitung ulang terlebih dahulu (' + (run.staleReason || 'data berubah') + ').');
@@ -224,6 +244,12 @@
   };
 
   pr.setStatus = async function (id, from, to, action, auth) {
+    if (NP.db.remote) {
+      if (action === 'lock') await NP.db.payrollLock(id);
+      else if (action === 'unlock') await NP.db.payrollUnlock(id, auth);
+      else if (action === 'revert') await NP.db.payrollRevert(id);
+      return pr.get(id);
+    }
     const usr = NP.sec.user();
     return NP.db.run(['payrollRuns', 'transactions', 'auditLog'], async (t) => {
       const run = await t.get('payrollRuns', id);
@@ -250,6 +276,7 @@
   pr.revert = (id) => pr.setStatus(id, 'approved', 'draft', 'revert');
 
   pr.remove = async function (id) {
+    if (NP.db.remote) return NP.db.payrollDelete(id);
     return NP.db.run(['payrollRuns', 'transactions', 'auditLog'], async (t) => {
       const run = await t.get('payrollRuns', id);
       if (!run) return;

@@ -36,6 +36,10 @@
     const v = svc.validate(s, list);
     if (v.errors.length) throw new Error(v.errors.join('\n'));
     s.method = rs.methodOf(s.shares);
+    if (NP.db.remote) {
+      s.id = s.code = await NP.db.saveService(s);
+      return s;
+    }
     const isNew = !s.id;
     const before = list.find((x) => x.id === s.id);
     await NP.db.run(['services', 'counters', 'auditLog'], async (t) => {
@@ -61,6 +65,7 @@
   };
 
   svc.setActive = async function (id, active) {
+    if (NP.db.remote) return NP.db.setServiceActive(id, active);
     const s = await NP.db.get('services', id);
     s.active = active;
     s.updatedAt = Date.now();
@@ -71,6 +76,7 @@
   };
 
   svc.remove = async function (id) {
+    if (NP.db.remote) return NP.db.deleteService(id);
     const used = (await svc.usage()).get(id) || 0;
     if (used) throw new Error('Tindakan sudah dipakai pada ' + used + ' transaksi. Nonaktifkan saja agar riwayat tetap utuh.');
     const s = await NP.db.get('services', id);

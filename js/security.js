@@ -128,7 +128,23 @@
     return (await NP.db.all('users')).sort((a, b) => a.username.localeCompare(b.username));
   }
 
+  let lastLoginError = '';
+  const isRemote = () => !!(NP.db && NP.db.remote);
+  const profileToCurrent = (p) => ({ id: p.id, username: p.username, name: p.name, email: p.email, role: p.role, mustChange: !!p.mustChange });
+
   async function login(username, password) {
+    lastLoginError = '';
+    if (isRemote()) {
+      const r = await NP.db.signIn(username, password);
+      if (r.error) {
+        lastLoginError = r.error;
+        return null;
+      }
+      current = profileToCurrent(r.user);
+      lastActivity = Date.now();
+      await NP.audit.log('login', 'user', current.id, 'Login berhasil');
+      return current;
+    }
     const list = await NP.db.all('users');
     const usr = list.find((x) => x.username.toLowerCase() === String(username || '').trim().toLowerCase() && x.active !== false);
     if (!usr || usr.hash !== hashPassword(password || '', usr.salt)) {
@@ -145,6 +161,11 @@
   }
 
   async function restore() {
+    if (isRemote()) {
+      const p = await NP.db.session();
+      current = p ? profileToCurrent(p) : null;
+      return current;
+    }
     let s = null;
     try {
       s = JSON.parse(sessionStorage.getItem(SESSION_KEY) || 'null');
@@ -159,6 +180,7 @@
   async function logout() {
     if (current) await NP.audit.log('logout', 'user', current.id, 'Logout');
     current = null;
+    if (isRemote()) await NP.db.signOut();
     try {
       sessionStorage.removeItem(SESSION_KEY);
     } catch (_) {}
@@ -167,6 +189,11 @@
   }
 
   async function verify(username, password, requireRole) {
+    if (isRemote()) {
+      const v = await NP.db.verifyCredentials(username, password);
+      if (!v || (requireRole && !requireRole.includes(v.role))) return null;
+      return v;
+    }
     const list = await NP.db.all('users');
     const usr = list.find((x) => x.username.toLowerCase() === String(username || '').trim().toLowerCase() && x.active !== false);
     if (!usr || usr.hash !== hashPassword(password || '', usr.salt)) return null;
@@ -176,6 +203,13 @@
 
   async function changePassword(userId, newPassword) {
     if (!newPassword || newPassword.length < 6) throw new Error('Kata sandi minimal 6 karakter.');
+    if (isRemote()) {
+      if (current && current.id === userId) {
+        await NP.db.changePassword(newPassword);
+        current.mustChange = false;
+      } else await NP.db.adminUsers({ action: 'reset_password', id: userId, password: newPassword });
+      return;
+    }
     const usr = await NP.db.get('users', userId);
     usr.salt = Math.random().toString(36).slice(2) + Date.now().toString(36);
     usr.hash = hashPassword(newPassword, usr.salt);
@@ -199,13 +233,13 @@
             : `<div class="auth-brand auth-brand-full"><img src="assets/logo-full.png" alt="Apotek Noura" class="auth-wordmark"><div class="auth-sub">PAYROLL MANAGEMENT SYSTEM</div></div>`}
           <h2>${opts.locked ? 'Sesi Terkunci' : 'Masuk ke Aplikasi'}</h2>
           <p class="muted">${opts.locked ? 'Aplikasi dikunci otomatis karena tidak ada aktivitas. Masukkan kata sandi untuk melanjutkan.' : 'Gunakan akun yang diberikan administrator.'}</p>
-          <label class="field"><span>Nama pengguna</span><input name="username" autocomplete="username" required value="${opts.locked && current ? u.esc(current.username) : ''}" ${opts.locked ? 'readonly' : ''}></label>
+          <label class="field"><span>${isRemote() ? 'Email' : 'Nama pengguna'}</span><input name="username" ${isRemote() ? 'type="email" autocomplete="email"' : 'autocomplete="username"'} required value="${opts.locked && current ? u.esc(isRemote() ? current.email || '' : current.username) : ''}" ${opts.locked ? 'readonly' : ''}></label>
           <label class="field"><span>Kata sandi</span><input name="password" type="password" autocomplete="current-password" required></label>
           <div class="auth-error" hidden></div>
           <button class="btn btn-primary btn-block" type="submit">${opts.locked ? 'Buka Kunci' : 'Masuk'}</button>
           ${opts.locked ? '<button type="button" class="btn btn-ghost btn-block" data-act="switch">Masuk dengan akun lain</button>' : ''}
           ${opts.hint ? `<div class="auth-hint">${opts.hint}</div>` : ''}
-          <div class="auth-foot">Data tersimpan lokal di perangkat ini (IndexedDB).</div>
+          <div class="auth-foot">${isRemote() ? 'Terhubung ke database pusat (Supabase). Semua perangkat memakai data yang sama.' : 'Data tersimpan lokal di perangkat ini (IndexedDB).'}</div>
         </form>`;
       document.body.appendChild(el);
       const form = el.querySelector('form');
@@ -219,7 +253,7 @@
         const r = await login(fd.get('username'), fd.get('password'));
         if (!r) {
           err.hidden = false;
-          err.textContent = 'Nama pengguna atau kata sandi salah.';
+          err.textContent = lastLoginError || 'Nama pengguna atau kata sandi salah.';
           form.password.value = '';
           form.password.focus();
           return;
@@ -252,7 +286,7 @@
         title: 'Otorisasi Administrator',
         size: 'sm',
         body: `<p class="muted">${u.esc(reason)}</p>
-          <label class="field"><span>Nama pengguna administrator</span><input name="au" autocomplete="off" value="${current && current.role === 'admin' ? u.esc(current.username) : ''}"></label>
+          <label class="field"><span>${isRemote() ? 'Email administrator' : 'Nama pengguna administrator'}</span><input name="au" autocomplete="off" value="${current && current.role === 'admin' ? u.esc(isRemote() ? current.email || '' : current.username) : ''}"></label>
           <label class="field"><span>Kata sandi</span><input name="ap" type="password" autocomplete="off"></label>
           ${opts.noNote ? '' : '<label class="field"><span>Catatan / alasan perubahan <b class="req">*</b></span><textarea name="an" rows="3" placeholder="Wajib diisi untuk audit"></textarea></label>'}
           <div class="form-error" hidden></div>`,
@@ -276,7 +310,7 @@
                 return;
               }
               mm.close(true);
-              resolve({ by: usr.username, byName: usr.name, note });
+              resolve({ by: usr.username, byName: usr.name, note, token: usr.token || null });
             }
           }
         ],
@@ -303,6 +337,7 @@
       }, extra || {});
     },
     async log(action, entity, entityId, detail, extra) {
+      if (NP.db && NP.db.remote) return NP.db.log(action, entity, entityId, detail);
       try {
         await NP.db.put('auditLog', this.entry(action, entity, entityId, detail, extra));
       } catch (e) {

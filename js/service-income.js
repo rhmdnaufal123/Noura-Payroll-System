@@ -26,7 +26,7 @@
           if (!out.has(s.recipientId)) out.set(s.recipientId, []);
           out.get(s.recipientId).push({
             trxId: t.id, lineId: it.lineId, si, date: t.date, serviceId: it.serviceId, serviceName: it.serviceName, unit: it.unit,
-            qty: it.qty, unitAmount: s.unitAmount, amount: s.amount, category: s.category, state: p.state || null, runId: p.runId || null, earlier: !inPeriod
+            qty: it.qty, unitAmount: s.unitAmount, amount: s.amount, category: s.category, state: p.state || null, runId: p.runId || null, earlier: !inPeriod, allocId: s.allocId
           });
         });
       });
@@ -82,6 +82,7 @@
     const runs = await NP.db.all('payrollRuns');
     const locked = runs.find((r) => r.status === 'locked' && r.employeeIds.includes(w.employeeId) && u.inRange(w.date, r.start, r.end));
     if (locked) throw new Error('Tanggal tersebut sudah termasuk penggajian terkunci ' + locked.id + '.');
+    if (NP.db.remote) return NP.db.saveWorklog(w);
     const isNew = !w.id;
     if (isNew) w.id = u.uid('WL');
     w.updatedAt = Date.now();
@@ -90,6 +91,14 @@
       await t.put('auditLog', NP.audit.entry(isNew ? 'worklog.create' : 'worklog.update', 'worklog', w.id, w.employeeId + ' ' + w.date + ': ' + w.shifts + ' shift, ' + w.sessions + ' sesi'));
     });
     return w;
+  };
+
+  inc.deleteWorklog = async function (w) {
+    if (NP.db.remote) return NP.db.deleteWorklog(w.id);
+    await NP.db.run(['worklogs', 'auditLog'], async (t) => {
+      await t.del('worklogs', w.id);
+      await t.put('auditLog', NP.audit.entry('worklog.delete', 'worklog', w.id, w.employeeId + ' ' + w.date));
+    });
   };
 
   NP.income = inc;
@@ -385,10 +394,11 @@
         const w = data.logs.find((x) => x.id === a.dataset.id);
         if (runs.some((r) => r.status === 'locked' && r.employeeIds.includes(w.employeeId) && u.inRange(w.date, r.start, r.end))) return ui.toast('Catatan sudah termasuk penggajian terkunci.', 'error');
         if (!(await ui.confirm({ message: 'Hapus catatan ini?', danger: true, okLabel: 'Hapus' }))) return;
-        await NP.db.run(['worklogs', 'auditLog'], async (t) => {
-          await t.del('worklogs', w.id);
-          await t.put('auditLog', NP.audit.entry('worklog.delete', 'worklog', w.id, w.employeeId + ' ' + w.date));
-        });
+        try {
+          await inc.deleteWorklog(w);
+        } catch (err) {
+          return ui.toast(err.message, 'error');
+        }
         await load();
         drawWork();
       }

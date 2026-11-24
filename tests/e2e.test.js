@@ -417,6 +417,15 @@ async function step(name, fn) {
     assert.strictEqual(r.koreksi, 10000);
     assert.strictEqual(r.jasa, undefined);
   });
+  await step('batal setelah koreksi: total koreksi = −jasa awal (tidak dihitung dua kali)', async () => {
+    const adj = await ev(async (id) => {
+      const t = await NP.trx.get(id);
+      await NP.trx.cancel(id, 'Pasien batal', { auth: { by: 'admin', note: 'Uji pembatalan setelah koreksi' } });
+      return (await NP.trx.get(id)).adjustments.map((a) => a.amount);
+    }, trxGula.id);
+    // jasa awal terkunci Rp30.000 → koreksi +Rp10.000 → batal −Rp40.000; bersih −Rp30.000
+    assert.deepStrictEqual(adj, [10000, -40000]);
+  });
   await step('buka kunci wajib otorisasi; kembali ke draft & hapus', async () => {
     await go('payroll-history?open=' + runId);
     await page.locator('.modal [data-r=unlock]').click();

@@ -1,0 +1,8 @@
+# Konfigurasi minimal Supabase CLI (supabase link / db push / functions deploy).
+project_id = "noura-payroll"
+
+[db]
+major_version = 15
+
+[functions.admin-users]
+verify_jwt = true

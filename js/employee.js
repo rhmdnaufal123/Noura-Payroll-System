@@ -57,6 +57,10 @@
     const list = await NP.db.all('employees');
     const errs = emp.validate(e, list);
     if (errs.length) throw new Error(errs.join('\n'));
+    if (NP.db.remote) {
+      e.id = await NP.db.saveEmployee(e);
+      return e;
+    }
     const isNew = !e.id;
     const before = isNew ? null : list.find((x) => x.id === e.id);
     await NP.db.run(['employees', 'counters', 'auditLog'], async (t) => {
@@ -95,6 +99,7 @@
   };
 
   emp.remove = async function (id) {
+    if (NP.db.remote) return NP.db.deleteEmployee(id);
     const refs = await emp.references(id);
     if (refs.trx || refs.runs || refs.services) {
       throw new Error('Karyawan sudah memiliki ' + [refs.trx && refs.trx + ' transaksi', refs.runs && refs.runs + ' periode gaji', refs.services && refs.services + ' konfigurasi tindakan'].filter(Boolean).join(', ') + '. Ubah status menjadi "Tidak Aktif" atau "Mengundurkan Diri" agar riwayat tetap utuh.');

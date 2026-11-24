@@ -1,14 +1,19 @@
 {
   "name": "noura-payroll-system",
-  "version": "1.0.0",
-  "description": "Noura Payroll Management — penggajian, pembagian jasa pelayanan, dan administrasi Apotek Noura & Praktek Dokter Umum",
+  "version": "2.0.0",
+  "description": "Noura Payroll Management \u2014 penggajian, pembagian jasa pelayanan, dan administrasi Apotek Noura & Praktek Dokter Umum",
   "private": true,
   "scripts": {
     "start": "python3 -m http.server 8080",
+    "build:env": "node scripts/build-env.mjs",
+    "seed:generate": "node scripts/generate-seed.mjs",
     "test": "node tests/unit.test.js",
-    "test:e2e": "node tests/e2e.test.js"
+    "test:db": "PGDATABASE=noura_test bash tests/db/reset.sh && PGDATABASE=noura_test node tests/db/db.test.js",
+    "test:e2e": "node tests/e2e.test.js",
+    "test:e2e:supabase": "PGDATABASE=noura_e2e node tests/e2e-supabase.test.js"
   },
   "devDependencies": {
-    "playwright": "^1.47.0"
+    "pg": "8.13.1",
+    "playwright": "1.47.2"
   }
 }

@@ -4,7 +4,9 @@ Aplikasi web untuk **penggajian otomatis, pembagian jasa pelayanan (revenue shar
 
 Semua fitur berjalan sungguhan di browser: data disimpan di **IndexedDB**, perhitungan uang memakai bilangan bulat rupiah, dan setiap perubahan penting tercatat di audit log.
 
-> **Penting — penyimpanan lokal.** Data tersimpan di browser dan perangkat yang dipakai. Aplikasi **belum** mendukung pemakaian bersama dari beberapa perangkat. Lakukan **Backup JSON** secara rutin (Pengaturan › Backup & Restore). Lihat bagian *Arsitektur & Pengembangan Backend* untuk rencana multi-perangkat.
+> **Dua mode penyimpanan.**
+> - **Mode Supabase (produksi, multi-perangkat):** bila `js/env.js` berisi `SUPABASE_URL` dan `SUPABASE_ANON_KEY`, seluruh data disimpan di PostgreSQL Supabase dengan login Supabase Auth, Row Level Security, dan fungsi server atomik. Tidak ada cadangan ke penyimpanan lokal. **Panduan lengkap: [docs/SUPABASE.md](docs/SUPABASE.md).**
+> - **Mode lokal (demo/satu perangkat):** bila `js/env.js` kosong, data disimpan di IndexedDB browser dengan data demonstrasi. Cocok untuk mencoba aplikasi.
 
 ---
 
@@ -140,24 +142,24 @@ Kata sandi disimpan sebagai hash SHA-256 bergaram; nomor rekening hanya terlihat
 ## Pengujian
 
 ```bash
-node tests/unit.test.js        # 28 uji: format uang, revenue sharing, perhitungan gaji
-node tests/e2e.test.js         # 39 uji browser (butuh paket `playwright` + Chromium)
+npm install
+npm test                    # 28 uji unit: format uang, revenue sharing, perhitungan gaji
+npm run test:db             # 31 uji database: migrasi, RLS per role, RPC, anti duplikasi, audit
+npm run test:e2e            # 40 uji browser mode lokal
+npm run test:e2e:supabase   # 18 uji browser mode Supabase (2 perangkat, database yang sama)
 ```
+GitHub Actions (`.github/workflows/ci.yml`) menjalankan seluruh uji pada setiap push.
 
 Uji end-to-end menjalankan server lokal sendiri dan menguji: login & hak akses, CRUD karyawan, impor/ekspor Excel, tambah tindakan kombinasi 3 penerima, validasi pembagian, snapshot harga historis, input tindakan (contoh Gula Darah ×5 = Rp140.000 → Apotek Rp90.000 + Bidan Rp50.000), multi-tindakan, edit & batal transaksi, generate payroll lewat wizard, anti penghitungan ganda, rekonsiliasi, setujui/kunci, koreksi terkunci dengan otorisasi & adjustment, buka kunci, slip PDF/PNG/HTML, ZIP, laporan, backup/restore, serta tampilan iPhone/Android/iPad/laptop tanpa scroll horizontal.
 
-## Arsitektur & pengembangan backend
+## Arsitektur
 
-Semua modul hanya mengakses data melalui `NP.db` (`js/database.js`) dengan API: `get`, `all`, `put`, `putMany`, `del`, `clear`, `run(stores, fn)` (transaksi atomik), `exportAll`, `importAll`. Logika bisnis inti (`revenue-sharing.js`, `calculator.js`) murni dan dapat dipakai ulang di server (Node.js).
+Semua modul mengakses data melalui `NP.db`:
 
-Untuk pemakaian **multi-perangkat & multi-administrator**:
+- `js/database.js` — driver IndexedDB (mode lokal) dan driver memori cadangan untuk versi artifact.
+- `js/supabase-driver.js` — driver Supabase: membaca tabel relasional dan merakitnya menjadi dokumen yang dipakai halaman; semua perubahan data keuangan lewat fungsi RPC PostgreSQL (`supabase/migrations`).
 
-1. Buat API backend (mis. Node.js/Express, Laravel, atau Supabase) dengan autentikasi (JWT/sesi) dan database terpusat (PostgreSQL/MySQL) berisi tabel yang sama dengan object store: `employees`, `services`, `transactions`, `payrollRuns`, `worklogs`, `components`, `settings`, `users`, `auditLog`, `counters`.
-2. Implementasikan `RestDriver` dengan method yang sama seperti `IndexedDBDriver`; operasi `run()` dipetakan ke transaksi database di server (mis. endpoint `POST /tx`), dan penomoran memakai sequence database.
-3. Pindahkan perhitungan payroll & reservasi jasa ke server (pakai ulang `calculator.js` & `revenue-sharing.js`) agar penguncian dan anti-ganda dijamin di satu tempat; validasi hak akses juga di server.
-4. Ganti `NP.db = IndexedDBDriver` dengan driver baru; impor data awal dari file Backup JSON.
-
-Hingga backend tersedia, setiap perangkat memiliki database sendiri — gunakan satu perangkat utama dan Backup/Restore JSON untuk memindahkan data.
+Logika inti dipakai bersama: `js/revenue-sharing.js` (padanannya di server: `compute_allocations`) dan `js/calculator.js` (hasilnya diverifikasi server saat menyimpan penggajian). Detail skema, RLS, role, migrasi, backup, dan deploy ada di [docs/SUPABASE.md](docs/SUPABASE.md).
 
 ## Lisensi pustaka pihak ketiga
 
