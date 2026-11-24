@@ -138,7 +138,8 @@
           }
           return {
             id: s.id, code: s.id, name: s.name, category: s.category, unit: s.unit_code, price: num(s.price), method: s.method, active: s.active, notes: s.notes,
-            shares: rs.filter((r) => !r.employee_id).map(share),
+            shares: rs.filter((r) => !r.employee_id && (r.variant || 'standard') === 'standard').map(share),
+            doctorShares: rs.filter((r) => !r.employee_id && r.variant === 'doctor').map(share),
             overrides: [...ov.entries()].map(([employeeId, list]) => ({ employeeId, shares: list.sort((a, b) => a.sort_order - b.sort_order).map(share) })),
             createdAt: ts(s.created_at), updatedAt: ts(s.updated_at)
           };
@@ -152,7 +153,7 @@
         return rows.map((t) => {
           const its = (itemsBy.get(t.id) || []).sort((a, b) => a.line_no - b.line_no).map((i) => ({
             lineId: i.id, serviceId: i.service_id, serviceCode: i.service_code, serviceName: i.service_name, category: i.category, unit: i.unit_code,
-            qty: i.qty, price: num(i.unit_price), gross: num(i.gross), performers: i.performers || {}, performerNames: i.performer_names || {}, overrideFor: i.override_employee_id,
+            qty: i.qty, price: num(i.unit_price), gross: num(i.gross), withDoctor: !!i.with_doctor, performers: i.performers || {}, performerNames: i.performer_names || {}, overrideFor: i.override_employee_id,
             shares: (allocBy.get(i.id) || []).sort((a, b) => a.sort_order - b.sort_order).map((a) => ({
               allocId: a.id, type: a.recipient_type, target: a.target, mode: a.mode, value: num(a.rule_value), recipientId: a.recipient_employee_id || a.recipient_unit || null,
               recipientName: a.recipient_name, category: a.category, role: a.recipient_type === 'role' ? a.target : a.recipient_type === 'employee' ? a.category : null,
@@ -366,7 +367,7 @@
         return rpc('save_employee', { p });
       },
       deleteEmployee: (id) => rpc('delete_employee', { p_id: id }),
-      saveService: (s) => rpc('save_service', { p: { id: s.id || null, name: s.name, category: s.category, unit: s.unit, price: s.price, active: s.active, notes: s.notes || '', shares: s.shares, overrides: s.overrides || [] } }),
+      saveService: (s) => rpc('save_service', { p: { id: s.id || null, name: s.name, category: s.category, unit: s.unit, price: s.price, active: s.active, notes: s.notes || '', shares: s.shares, doctorShares: s.doctorShares || [], overrides: s.overrides || [] } }),
       setServiceActive: (id, active) => rpc('set_service_active', { p_id: id, p_active: active }),
       deleteService: (id) => rpc('delete_service', { p_id: id }),
       /** Simpan banyak transaksi dalam satu transaksi database (input bulanan / impor POS). */

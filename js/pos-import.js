@@ -130,7 +130,8 @@
    * @param lines      hasil parseSheet().lines
    * @param services   master tindakan (aktif & nonaktif)
    * @param employees  karyawan
-   * @param opt        { categories:Set<string> kategori POS yang diambil, defaults:{role:empId}, roles:{dokter:[emp...],...} }
+   * @param opt        { categories:Set<string> kategori POS yang diambil, defaults:{role:empId}, roles:{dokter:[emp...],...},
+   *                     doctorMode: 'column' (dengan dokter bila kolom Dokter terisi, default) | 'always' | 'never' }
    */
   function plan(lines, services, employees, opt) {
     opt = opt || {};
@@ -170,8 +171,10 @@
         if (!(l.qty >= 1) || Math.floor(l.qty) !== l.qty) problems.push({ ref, msg: '"' + l.product + '": jumlah ' + l.qty + ' tidak valid.' });
         const price = l.qty > 0 && l.subtotal > 0 && Number.isInteger(l.subtotal / l.qty) ? l.subtotal / l.qty : Math.round(l.unitPrice);
         if (!(price > 0)) problems.push({ ref, msg: '"' + l.product + '": harga 0.' });
+        const mode = opt.doctorMode || 'column';
+        const withDoctor = NP.rs.effectiveWithDoctor(s, mode === 'always' || (mode === 'column' && !!l.doctor));
         const performers = {};
-        for (const role of NP.rs.requiredRoles(s)) {
+        for (const role of NP.rs.requiredRoles(s, withDoctor)) {
           let id = null;
           if (role === 'dokter' && l.doctor) {
             const m = matchEmployee(l.doctor, roleStaff.dokter || []);
@@ -182,11 +185,11 @@
           else problems.push({ ref, msg: '"' + s.name + '" membutuhkan ' + ((NP.C.ROLES[role] || {}).label || role) + ' pelaksana — pilih pelaksana default.', role });
         }
         // validasi pembagian dengan harga file (mis. harga POS lebih rendah dari total bagian nominal)
-        if (price > 0 && l.qty >= 1 && NP.rs.requiredRoles(s).every((r) => performers[r])) {
-          const chk = NP.rs.compute(s, { price, qty: l.qty, performers, employees: empMap });
-          for (const err of chk.errors) problems.push({ ref, msg: '"' + s.name + '" (harga ' + u.rp(price) + '): ' + err });
+        if (price > 0 && l.qty >= 1 && NP.rs.requiredRoles(s, withDoctor).every((r) => performers[r])) {
+          const chk = NP.rs.compute(s, { price, qty: l.qty, performers, employees: empMap, withDoctor });
+          for (const err of chk.errors) problems.push({ ref, msg: '"' + s.name + (withDoctor ? ' (dengan dokter)' : '') + '" (harga ' + u.rp(price) + '): ' + err });
         }
-        items.push({ serviceId: s.id, serviceName: s.name, category: s.category, qty: l.qty, price, performers, lineId: u.uid('ln') });
+        items.push({ serviceId: s.id, serviceName: s.name, category: s.category, qty: l.qty, price, withDoctor, performers, lineId: u.uid('ln') });
       }
       const noteParts = ['Impor POS ' + ref];
       if (first.doctor) noteParts.push(first.doctor);

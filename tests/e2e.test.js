@@ -307,6 +307,72 @@ async function step(name, fn) {
     assert.strictEqual(t.totals.bidan, 10000);
     assert.strictEqual(t.totals.apotek, 80000);
   });
+  await step('master tindakan: pembagian berbeda dengan dokter & tanpa dokter', async () => {
+    await go('services');
+    await page.click('[data-act=add]');
+    const m = page.locator('.svc-form');
+    await m.locator('[name=name]').fill('Suntik Vitamin Uji');
+    await m.locator('[name=category]').selectOption('Dokter Umum & Bidan');
+    await m.locator('[name=unit]').selectOption('KLINIK');
+    await m.locator('[name=price]').fill('200000');
+    // tanpa dokter: unit sisa + bidan Rp40.000
+    const main = m.locator('#share-main .share-row:not(.share-head)');
+    await main.nth(0).locator('[data-f=target]').selectOption('KLINIK');
+    await main.nth(0).locator('[data-f=mode]').selectOption('remainder');
+    await main.nth(1).locator('[data-f=value]').fill('40000');
+    assert.ok(await m.locator('.doctor-split').isHidden());
+    await m.locator('[data-dm=variant]').click();
+    await m.locator('.doctor-split').waitFor();
+    assert.ok(/TANPA dokter/.test(await m.locator('#main-title').innerText()));
+    // dengan dokter: salinan + baris dokter otomatis; bidan Rp20.000, dokter Rp60.000
+    const doc = m.locator('#share-doctor .share-row:not(.share-head)');
+    assert.strictEqual(await doc.count(), 3);
+    assert.strictEqual(await doc.nth(2).locator('[data-f=target]').inputValue(), 'dokter');
+    await doc.nth(1).locator('[data-f=value]').fill('20000');
+    await doc.nth(2).locator('[data-f=value]').fill('60000');
+    await page.waitForFunction(() => /Rp120\.000/.test(document.querySelector('#share-preview-doctor').innerText) && /Rp160\.000/.test(document.querySelector('#share-preview').innerText), null, { timeout: 10000 })
+      .catch(async () => assert.fail('Preview: ' + (await m.locator('#share-preview-doctor').innerText())));
+    await modalBtn('Simpan Tindakan').click();
+    await page.waitForSelector('.modal-backdrop', { state: 'detached' });
+    const s = await ev(async () => (await NP.db.all('services')).find((x) => x.name === 'Suntik Vitamin Uji'));
+    assert.deepStrictEqual(s.doctorShares.map((x) => [x.type, x.target, x.value]), [['unit', 'KLINIK', 0], ['role', 'bidan', 20000], ['role', 'dokter', 60000]]);
+    assert.ok(/Dengan dokter/.test(await page.locator('#svc-list').innerText()));
+  });
+  await step('input tindakan: pilih dengan/tanpa dokter → pembagian & pelaksana mengikuti pilihan', async () => {
+    await go('input');
+    const ids = await ev(async () => {
+      const s = await NP.db.all('services');
+      const e = await NP.db.all('employees');
+      // bidan lain (bukan "Bd. Uji Coba") agar uji slip penggajian di bawah tidak terpengaruh
+      const bd = e.find((x) => x.position === 'Bidan' && x.status === 'aktif' && x.name !== 'Bd. Uji Coba');
+      return { sv: s.find((x) => x.name === 'Suntik Vitamin Uji').id, dr: e.find((x) => x.name === 'dr. Siti Rahmawati').id, bd: bd.id };
+    });
+    await page.selectOption('.item-row [data-f=serviceId]', ids.sv);
+    await page.waitForSelector('.item-variant [data-wd="0"].active');
+    assert.strictEqual(await page.locator('.item-row [data-perf=dokter]').count(), 0, 'tanpa dokter tidak meminta dokter');
+    await page.selectOption('.item-row [data-perf=bidan]', ids.bd);
+    let sum = await page.locator('#sum-box').innerText();
+    assert.ok(/Rp160\.000/.test(sum) && /Rp40\.000/.test(sum), sum);
+    await page.fill('.input-form [name=patient]', 'Pasien Tanpa Dokter');
+    await clickToast('[data-act=save]', /tersimpan/);
+    await page.selectOption('.item-row [data-f=serviceId]', ids.sv);
+    await page.click('.item-variant [data-wd="1"]');
+    await page.waitForSelector('.item-row [data-perf=dokter]');
+    await page.selectOption('.item-row [data-perf=dokter]', ids.dr);
+    if (!(await page.inputValue('.item-row [data-perf=bidan]'))) await page.selectOption('.item-row [data-perf=bidan]', ids.bd);
+    sum = await page.locator('#sum-box').innerText();
+    assert.ok(/Rp120\.000/.test(sum) && /Rp60\.000/.test(sum) && /Rp20\.000/.test(sum), sum);
+    await page.fill('.input-form [name=patient]', 'Pasien Dengan Dokter');
+    await clickToast('[data-act=save]', /tersimpan/);
+    const got = await ev(async () => {
+      const ts = await NP.db.all('transactions');
+      const f = (p) => ts.find((t) => t.patient === p);
+      return [f('Pasien Tanpa Dokter'), f('Pasien Dengan Dokter')].map((t) => ({ wd: t.items[0].withDoctor, roles: Object.keys(t.items[0].performers).sort(), klinik: t.totals.klinik, dokter: t.totals.dokter, bidan: t.totals.bidan }));
+    });
+    assert.deepStrictEqual(got, [{ wd: false, roles: ['bidan'], klinik: 160000, dokter: 0, bidan: 40000 }, { wd: true, roles: ['bidan', 'dokter'], klinik: 120000, dokter: 60000, bidan: 20000 }]);
+    await go('transactions');
+    assert.ok(/Suntik Vitamin Uji \(dengan dokter\)/.test(await page.locator('#view').innerText()));
+  });
   await step('tanpa memilih petugas → tidak bisa disimpan', async () => {
     await go('input');
     const gid = await ev(async () => (await NP.db.all('services')).find((x) => x.name === 'Konsultasi Dokter Umum').id);
@@ -616,6 +682,9 @@ async function step(name, fn) {
       assert.ok(!overlap(r[0], r[1]) && !overlap(r[0], r[2]) && !overlap(r[1], r[2]), JSON.stringify({ vp, r }));
       const svc = await ev(() => document.querySelector('.item-svc select').getBoundingClientRect().width);
       assert.ok(svc >= 200, 'pilihan tindakan terlalu sempit: ' + svc);
+      // bilah atas harus buram penuh agar teks yang di-scroll tidak terlihat menimpa judul
+      const bg = await ev(() => getComputedStyle(document.querySelector('.topbar')).backgroundColor);
+      assert.ok(!/rgba\([^)]*,\s*0?\.\d+\)|color\(.*\/\s*0?\.\d/.test(bg), 'bilah atas transparan: ' + bg);
     }
   });
 

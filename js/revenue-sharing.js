@@ -7,6 +7,9 @@
  *   - role     : target 'dokter'|'bidan'|'perawat'|'farmasi'|'petugas' -> petugas pelaksana transaksi
  *   - employee : target = ID karyawan tertentu
  *   - other    : target = nama penerima lain (non-karyawan, mis. laboratorium mitra)
+ * Varian dokter (opsional): service.doctorShares = konfigurasi khusus bila tindakan dilakukan
+ * DENGAN dokter; service.shares dipakai bila TANPA dokter. Pembagian khusus per petugas
+ * (overrides) tetap diutamakan pada kedua varian.
  * Mode:
  *   - nominal   : rupiah tetap per 1 tindakan
  *   - percent   : persen dari harga jual per tindakan
@@ -50,21 +53,33 @@
     }
   }
 
-  /** Peran-peran pelaksana yang dibutuhkan oleh suatu tindakan. */
-  function requiredRoles(service) {
+  /** Apakah tindakan memiliki pembagian berbeda untuk "dengan dokter" dan "tanpa dokter". */
+  function hasDoctorVariant(service) {
+    return !!(service && service.doctorShares && service.doctorShares.length);
+  }
+  /** Varian yang benar-benar dipakai: dengan dokter hanya bila tindakan memilikinya. */
+  function effectiveWithDoctor(service, withDoctor) {
+    return !!withDoctor && hasDoctorVariant(service);
+  }
+  function baseShares(service, withDoctor) {
+    return effectiveWithDoctor(service, withDoctor) ? service.doctorShares : (service && service.shares) || [];
+  }
+
+  /** Peran-peran pelaksana yang dibutuhkan oleh suatu tindakan (pada varian dengan/tanpa dokter). */
+  function requiredRoles(service, withDoctor) {
     const roles = new Set();
-    for (const s of (service && service.shares) || []) if (s.type === 'role') roles.add(s.target);
+    for (const s of baseShares(service, withDoctor)) if (s.type === 'role') roles.add(s.target);
     for (const o of (service && service.overrides) || []) for (const s of o.shares || []) if (s.type === 'role') roles.add(s.target);
     return [...roles];
   }
 
   /** Pilih konfigurasi bagian: override khusus petugas bila ada, selain itu konfigurasi standar. */
-  function pickConfig(service, performers) {
+  function pickConfig(service, performers, withDoctor) {
     const ids = Object.values(performers || {}).filter(Boolean);
     for (const o of (service && service.overrides) || []) {
       if (ids.includes(o.employeeId) && o.shares && o.shares.length) return { shares: o.shares, overrideFor: o.employeeId };
     }
-    return { shares: (service && service.shares) || [], overrideFor: null };
+    return { shares: baseShares(service, withDoctor), overrideFor: null };
   }
 
   /** Bagi `total` sesuai bobot (float) menjadi bilangan bulat dengan metode sisa terbesar. */
@@ -86,7 +101,7 @@
   /**
    * Hitung pembagian untuk satu baris tindakan.
    * @param {object} service  master tindakan
-   * @param {object} opt { price, qty, performers:{role:empId}, employees: Map|obj, preview:boolean }
+   * @param {object} opt { price, qty, performers:{role:empId}, employees: Map|obj, preview:boolean, withDoctor:boolean }
    * @returns {{shares:Array, gross:number, unitPrice:number, qty:number, total:number, unallocated:number, errors:string[], warnings:string[], overrideFor:string|null}}
    */
   function compute(service, opt) {
@@ -102,7 +117,8 @@
     if (price < 0) errors.push('Harga jual tidak boleh negatif.');
     if (qty < 1) errors.push('Jumlah tindakan minimal 1.');
 
-    const picked = pickConfig(service, performers);
+    const withDoctor = effectiveWithDoctor(service, opt.withDoctor);
+    const picked = pickConfig(service, performers, withDoctor);
     const cfg = picked.shares.map((s) => Object.assign({}, s));
     if (!cfg.length) warnings.push('Tindakan belum memiliki konfigurasi pembagian; seluruh pendapatan menjadi bagian unit usaha.');
 
@@ -212,7 +228,7 @@
 
     const gross = price * qty;
     const total = shares.reduce((a, s) => a + s.amount, 0);
-    return { shares, gross, unitPrice: price, qty, total, unallocated: errors.length ? 0 : gross - total, errors, warnings, overrideFor: picked.overrideFor };
+    return { shares, gross, unitPrice: price, qty, total, unallocated: errors.length ? 0 : gross - total, errors, warnings, overrideFor: picked.overrideFor, withDoctor };
   }
 
   /** Validasi konfigurasi bagian pada form master tindakan (tanpa petugas). */
@@ -223,6 +239,11 @@
       if (!s.type) errs.push('Jenis penerima wajib dipilih.');
       if (s.type !== 'other' && !s.target) errs.push('Penerima pendapatan wajib dipilih.');
       if (s.type === 'other' && !String(s.target || '').trim()) errs.push('Nama penerima lainnya wajib diisi.');
+    }
+    if (hasDoctorVariant(service)) {
+      const rd = compute(service, { price: service.price, qty: 1, preview: true, withDoctor: true });
+      rd.errors.forEach((e) => errs.push('Dengan dokter: ' + e));
+      for (const sh of service.doctorShares) if (sh.type !== 'other' && !sh.target) errs.push('Dengan dokter: penerima pendapatan wajib dipilih.');
     }
     for (const o of service.overrides || []) {
       if (!o.employeeId) errs.push('Pembagian khusus petugas: karyawan wajib dipilih.');
@@ -250,6 +271,6 @@
     return t;
   }
 
-  NP.rs = { compute, validateConfig, summarize, summarizeTrx, requiredRoles, pickConfig, methodOf, methodLabel, targetLabel, apportion, MODE_LABELS, TYPE_LABELS };
+  NP.rs = { compute, validateConfig, summarize, summarizeTrx, requiredRoles, pickConfig, hasDoctorVariant, effectiveWithDoctor, methodOf, methodLabel, targetLabel, apportion, MODE_LABELS, TYPE_LABELS };
   if (typeof module !== 'undefined' && module.exports) module.exports = NP;
 })(typeof globalThis !== 'undefined' ? globalThis : window);

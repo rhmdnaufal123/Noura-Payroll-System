@@ -411,6 +411,93 @@ const today = () => new Date(Date.now() + 7 * 3600000).toISOString().slice(0, 10
     assert.strictEqual(r.created.length, 1);
   });
 
+  console.log('Pembagian dengan / tanpa dokter');
+  await test('paritas SQL = JavaScript untuk varian dengan/tanpa dokter (200 konfigurasi acak)', async () => {
+    const rnd = (() => {
+      let s = 777;
+      return () => ((s = (s * 1103515245 + 12345) % 2147483648) / 2147483648);
+    })();
+    const randShares = (price, roles) => {
+      const out = [{ type: 'unit', target: 'APT', mode: rnd() < 0.5 ? 'remainder' : 'percent', value: 0 }];
+      if (out[0].mode === 'percent') out[0].value = Math.round(rnd() * 40 * 100) / 100;
+      let left = price;
+      for (const r of roles) {
+        if (rnd() < 0.5) {
+          const v = Math.floor(rnd() * left * 0.4);
+          left -= v;
+          out.push({ type: 'role', target: r, mode: 'nominal', value: v });
+        } else out.push({ type: 'role', target: r, mode: 'percent', value: Math.round(rnd() * 25 * 100) / 100 });
+      }
+      return out;
+    };
+    const c = await pool.connect();
+    try {
+      await c.query('begin');
+      const emps = { [E.bidan]: { id: E.bidan, name: 'Bd. Uji Satu', position: 'Bidan' }, [E.dokter]: { id: E.dokter, name: 'dr. Uji', position: 'Dokter Umum' }, [E.perawat]: { id: E.perawat, name: 'Ns. Uji', position: 'Perawat' } };
+      await c.query("select set_config('request.jwt.claims', $1, true)", [JSON.stringify({ sub: U.admin })]);
+      let compared = 0;
+      for (let n = 0; n < 200; n++) {
+        const price = 10000 + Math.floor(rnd() * 900000);
+        const qty = 1 + Math.floor(rnd() * 4);
+        const shares = randShares(price, rnd() < 0.5 ? ['bidan'] : ['bidan', 'perawat']);
+        const doctorShares = rnd() < 0.8 ? randShares(price, ['dokter', 'bidan']) : [];
+        const overrides = rnd() < 0.2 ? [{ employeeId: E.bidan, shares: randShares(price, ['bidan']) }] : [];
+        const svc = { unit: 'KLINIK', price, shares, doctorShares, overrides };
+        const wd = rnd() < 0.6;
+        const perf = { dokter: E.dokter, bidan: E.bidan, perawat: E.perawat };
+        const jsr = NP.rs.compute(svc, { price, qty, performers: perf, employees: emps, withDoctor: wd });
+        await c.query('savepoint s');
+        let sql;
+        try {
+          const id = (await c.query('select public.save_service($1) r', [{ name: 'Varian ' + n, category: 'Dokter Umum & Bidan', unit: 'KLINIK', price, shares, doctorShares, overrides }])).rows[0].r;
+          sql = (await c.query('select * from public.compute_allocations($1, $2, $3, $4, false, $5)', [id, price, qty, perf, wd])).rows;
+        } catch (e) {
+          sql = { error: e.message };
+        }
+        await c.query('rollback to savepoint s');
+        if (NP.rs.validateConfig(svc).errors.length || jsr.errors.length) {
+          assert.ok(sql.error, 'JS error tapi SQL sukses: ' + JSON.stringify(svc));
+          continue;
+        }
+        assert.ok(!sql.error, 'SQL error: ' + (sql.error || '') + ' ' + JSON.stringify(svc));
+        assert.deepStrictEqual(sql.map((r) => [r.recipient_type, r.target, r.category, Number(r.unit_amount), Number(r.amount), r.override_employee_id]), jsr.shares.map((s) => [s.type, s.target, s.category, s.unitAmount, s.amount, jsr.overrideFor]), JSON.stringify({ svc, wd }));
+        compared++;
+      }
+      assert.ok(compared > 120, 'konfigurasi valid yang dibandingkan: ' + compared);
+      await c.query('rollback');
+    } finally {
+      c.release();
+    }
+  });
+  await test('transaksi dengan dokter vs tanpa dokter memakai pembagian berbeda; pelaksana mengikuti varian', async () => {
+    S.injeksi = await as(U.admin, (c) => rpc(c, 'save_service', {
+      name: 'Injeksi Vitamin', category: 'Dokter Umum & Bidan', unit: 'KLINIK', price: 200000,
+      shares: [Un('KLINIK', 'remainder', 0), R('bidan', 'nominal', 40000)],
+      doctorShares: [Un('KLINIK', 'remainder', 0), R('dokter', 'nominal', 60000), R('bidan', 'nominal', 20000)]
+    }));
+    const rules = (await su('select variant, count(*)::int n from public.service_revenue_rules where service_id = $1 group by variant order by variant', [S.injeksi])).rows;
+    assert.deepStrictEqual(rules, [{ variant: 'doctor', n: 3 }, { variant: 'standard', n: 2 }]);
+    const mk = (wd, perf) => as(U.ops, (c) => rpc(c, 'create_service_transaction', { date: '2025-02-03', items: [{ serviceId: S.injeksi, qty: 2, price: 200000, withDoctor: wd, performers: perf }] }));
+    const t1 = await mk(false, { bidan: E.bidan, dokter: E.dokter });
+    const t2 = await mk(true, { bidan: E.bidan, dokter: E.dokter });
+    const alloc = async (id) => (await su('select a.category, a.amount::int from public.service_transaction_allocations a where a.transaction_id = $1 order by a.sort_order', [id])).rows;
+    assert.deepStrictEqual(await alloc(t1), [{ category: 'klinik', amount: 320000 }, { category: 'bidan', amount: 80000 }]);
+    assert.deepStrictEqual(await alloc(t2), [{ category: 'klinik', amount: 240000 }, { category: 'dokter', amount: 120000 }, { category: 'bidan', amount: 40000 }]);
+    const items = (await su('select transaction_id, with_doctor, performers from public.service_transaction_items where transaction_id in ($1, $2) order by transaction_id', [t1, t2])).rows;
+    assert.deepStrictEqual(items.map((i) => [i.with_doctor, Object.keys(i.performers).sort()]), [[false, ['bidan']], [true, ['bidan', 'dokter']]]);
+    await rejects(mk(true, { bidan: E.bidan }), /Dokter belum dipilih/);
+    // tindakan tanpa varian dokter: withDoctor diabaikan
+    const t3 = await as(U.ops, (c) => rpc(c, 'create_service_transaction', { date: '2025-02-03', items: [{ serviceId: S.suntik, qty: 1, price: 220000, withDoctor: true, performers: { bidan: E.bidan } }] }));
+    assert.strictEqual((await su('select with_doctor from public.service_transaction_items where transaction_id = $1', [t3])).rows[0].with_doctor, false);
+    // ubah transaksi: ganti ke tanpa dokter → snapshot baru; tetap dengan dokter → snapshot lama dipertahankan
+    const line = (await su('select id from public.service_transaction_items where transaction_id = $1', [t2])).rows[0].id;
+    await as(U.ops, (c) => rpc(c, 'update_service_transaction', t2, { date: '2025-02-03', items: [{ lineId: line, serviceId: S.injeksi, qty: 2, price: 200000, withDoctor: true, performers: { bidan: E.bidan, dokter: E.dokter } }] }, null));
+    assert.strictEqual((await su('select id from public.service_transaction_items where transaction_id = $1', [t2])).rows[0].id, line, 'item yang tidak berubah dipertahankan');
+    await as(U.ops, (c) => rpc(c, 'update_service_transaction', t2, { date: '2025-02-03', items: [{ lineId: line, serviceId: S.injeksi, qty: 2, price: 200000, withDoctor: false, performers: { bidan: E.bidan, dokter: E.dokter } }] }, null));
+    assert.deepStrictEqual(await alloc(t2), [{ category: 'klinik', amount: 320000 }, { category: 'bidan', amount: 80000 }]);
+    await rejects(as(U.admin, (c) => c.query("select * from public.compute_allocations('X', 1, 1, '{}')")), /permission denied/);
+  });
+
   await pool.end();
   console.log('\n' + passed + ' lulus, ' + failures.length + ' gagal');
   process.exit(failures.length ? 1 : 0);

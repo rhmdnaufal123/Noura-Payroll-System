@@ -24,7 +24,8 @@
 /* editor pembagian */
 .grid-split { display: grid; grid-template-columns: minmax(0, 1.5fr) minmax(0, 1fr); gap: 18px; margin-top: 6px; }
 .share-rows { display: flex; flex-direction: column; gap: 8px; margin-bottom: 10px; }
-.share-row { display: grid; grid-template-columns: minmax(120px, 1fr) minmax(130px, 1.3fr) 120px 140px 36px; gap: 8px; align-items: center; }
+.share-rows { container-type: inline-size; }
+.share-row { display: grid; grid-template-columns: minmax(150px, 1fr) minmax(140px, 1.2fr) 150px 140px 36px; gap: 8px; align-items: center; }
 .share-head { font-size: 11.5px; font-weight: 700; color: var(--muted); text-transform: uppercase; }
 .inline-qty { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; font-weight: 500; color: var(--muted); }
 .inline-qty input { width: 70px; min-height: 32px; padding: 4px 8px; }
@@ -98,7 +99,7 @@
 .bk-cell.has { background: color-mix(in srgb, var(--primary) 10%, transparent); }
 .bk-future, .bk-future .bk-cell { background: var(--surface-2); }
 .bk-tot { min-width: 90px; padding: 6px 8px !important; text-align: right !important; font-variant-numeric: tabular-nums; white-space: nowrap; }
-.bk-savebar { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; position: sticky; bottom: 8px; z-index: 5; }
+.bk-savebar { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
 .bk-sum { display: flex; gap: 20px; flex-wrap: wrap; }
 .bk-sum div { display: flex; flex-direction: column; }
 .bk-sum span { font-size: 12px; color: var(--muted); }
@@ -114,7 +115,25 @@
 .alert ul { margin: 4px 0 0; padding-left: 18px; }
 @media (max-width: 760px) {
   .bk-table .bk-name { min-width: 170px; max-width: 190px; }
-  .bk-savebar { position: static; }
   .bk-sum { gap: 14px; }
   .bk-savebar .btn { width: 100%; }
+}
+/* ===== Varian dengan / tanpa dokter ===== */
+.item-variant { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin: 0 0 10px; }
+.item-variant > span { font-size: 12.5px; font-weight: 600; color: var(--text-2); }
+.item-variant .seg-btn { min-height: 36px; padding: 6px 14px; }
+.doctor-mode .seg { flex-wrap: wrap; align-self: flex-start; }
+.doctor-mode .seg-btn { text-align: left; }
+.doctor-split { margin-top: 12px; padding-top: 12px; border-top: 1px dashed var(--border-strong); }
+.variant-line { display: flex; align-items: flex-start; gap: 6px; margin-top: 4px; }
+.variant-tag { flex: none; font-size: 10.5px; font-weight: 700; padding: 2px 6px; border-radius: 6px; background: var(--surface-2); color: var(--text-2); white-space: nowrap; }
+.variant-tag.doc { background: color-mix(in srgb, var(--primary) 14%, transparent); color: var(--primary-ink, var(--primary)); }
+.bk-variant { display: inline-block; margin-top: 2px; font-size: 11px; font-weight: 700; padding: 1px 6px; border-radius: 6px; background: var(--surface-2); color: var(--text-2); }
+.bk-variant.doc { background: color-mix(in srgb, var(--primary) 14%, transparent); color: var(--primary-ink, var(--primary)); }
+.pos-doc { flex-wrap: wrap; }
+/* Editor pembagian sempit (iPad, kolom berdampingan dengan preview): 2 kolom agar pilihan tidak terpotong. */
+@container (max-width: 700px) {
+  .share-row { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) 36px; padding: 8px; border: 1px solid var(--border); border-radius: 10px; }
+  .share-row > .icon-btn { grid-column: 3; grid-row: 1; }
+  .share-head { display: none; }
 }

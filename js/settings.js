@@ -209,7 +209,7 @@
         <div class="logo-row"><img class="logo-prev" data-logo-prev="company" src="${s.company.logo || 'assets/logo.png'}" alt=""><div><button type="button" class="btn btn-sm btn-ghost" data-logo="company">${ui.icon('image')}Ganti logo Apotek Noura</button> <button type="button" class="btn btn-sm btn-ghost" data-logo-clear="company">Logo bawaan</button><p class="muted small">PNG/JPG, otomatis diperkecil.</p></div></div>
         <label class="field"><span>Nama perusahaan</span><input name="companyName" value="${u.esc(s.company.name)}"></label>
       </fieldset>
-      <div class="grid-2">${unitBox('APT')}${unitBox('KLINIK')}</div>
+      <div class="grid-2 unit-boxes">${unitBox('APT')}${unitBox('KLINIK')}</div>
       <div class="form-actions"><button class="btn btn-primary" type="submit">${ui.icon('check')}<span>Simpan Identitas</span></button></div></form>`;
     const f = el.querySelector('form');
     f.onclick = async (e) => {

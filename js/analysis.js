@@ -45,7 +45,11 @@
     const byGroup = agg((r) => r.group, (r) => ({ label: C.SERVICE_GROUPS[r.group] })).sort((a, b) => GROUP_SLOT[a.key] - GROUP_SLOT[b.key]);
     const byCategory = agg((r) => r.it.category, (r) => ({ label: r.it.category, group: r.group })).sort((a, b) => GROUP_SLOT[a.group] - GROUP_SLOT[b.group] || b.qty - a.qty);
     const byService = agg((r) => normName(r.it.serviceName), (r) => ({ name: r.it.serviceName, category: r.it.category, group: r.group })).sort((a, b) => b.qty - a.qty || b.gross - a.gross);
-    for (const s of byService) s.avg = s.qty ? Math.round(s.gross / s.qty) : 0;
+    for (const s of byService) {
+      s.avg = s.qty ? Math.round(s.gross / s.qty) : 0;
+      s.wdQty = u.sum(rows.filter((r) => r.it.withDoctor && normName(r.it.serviceName) === s.key), (r) => r.it.qty);
+    }
+    const withDoctorQty = u.sum(rows.filter((r) => r.it.withDoctor), (r) => r.it.qty);
     const byPatient = agg((r) => normName(r.t.patient) || null, (r) => ({ name: r.t.patient.trim(), last: r.t.date, services: new Map() }));
     for (const r of rows) {
       const p = byPatient.find((x) => x.key === normName(r.t.patient));
@@ -83,7 +87,7 @@
       trend[r.group][i].qty += r.it.qty;
       trend[r.group][i].gross += r.it.gross;
     }
-    return { rows, total, byGroup, byCategory, byService, byPatient, byPerformer, trend: { daily, buckets, series: trend } };
+    return { rows, total, withDoctorQty, byGroup, byCategory, byService, byPatient, byPerformer, trend: { daily, buckets, series: trend } };
   }
 
   /* ===================== Halaman ===================== */
@@ -190,6 +194,7 @@
           { key: 'qty', label: 'Jumlah', align: 'right', render: (s) => `<b>${u.num(s.qty)}</b>` },
           { key: 'share', label: '% jumlah', align: 'right', render: (s) => `<span class="an-bar" style="--w:${T.qty ? (s.qty / T.qty) * 100 : 0}%;--gc:${groupColor(s.group)}">${pct(s.qty, T.qty)}</span>`, value: (s) => s.qty },
           { key: 'trx', label: 'Transaksi', align: 'right', render: (s) => u.num(s.trx) },
+          ...(A.withDoctorQty ? [{ key: 'wdQty', label: 'Dengan dokter', align: 'right', render: (s) => (s.wdQty ? u.num(s.wdQty) + `<small class="block muted">tanpa: ${u.num(s.qty - s.wdQty)}</small>` : '-') }] : []),
           { key: 'avg', label: 'Harga rata-rata', align: 'right', render: (s) => u.rp(s.avg) },
           { key: 'gross', label: 'Pendapatan', align: 'right', render: (s) => u.rp(s.gross) }
         ],
@@ -199,7 +204,7 @@
         pageSize: 30,
         cards: true,
         empty: 'Belum ada tindakan pada periode & filter ini.',
-        footer: (rows) => rows.length ? `<tr><th colspan="2">Total</th><th class="ta-right">${u.num(u.sum(rows, (s) => s.qty))}</th><th class="ta-right">100%</th><th></th><th></th><th class="ta-right">${u.rp(u.sum(rows, (s) => s.gross))}</th></tr>` : ''
+        footer: (rows) => rows.length ? `<tr><th colspan="2">Total</th><th class="ta-right">${u.num(u.sum(rows, (s) => s.qty))}</th><th class="ta-right">100%</th><th></th>${A.withDoctorQty ? `<th class="ta-right">${u.num(A.withDoctorQty)}</th>` : ''}<th></th><th class="ta-right">${u.rp(u.sum(rows, (s) => s.gross))}</th></tr>` : ''
       });
       ui.table(ui.$('#an-cat', body), {
         columns: [
@@ -308,12 +313,12 @@
       const grp = st.group === 'ALL' ? 'semua' : C.SERVICE_GROUPS[st.group];
       NP.exp.excel([
         { name: 'Ringkasan', aoa: [['ANALISIS TINDAKAN'], [label() + ' · kelompok ' + grp + (st.unit !== 'ALL' ? ' · ' + C.UNITS[st.unit].name : '') + (st.q ? ' · cari "' + st.q + '"' : '')], [], ['Kelompok', 'Jumlah tindakan', 'Transaksi', 'Pendapatan kotor']].concat(A.byGroup.map((g) => [g.label, g.qty, g.trx, g.gross]), [['TOTAL', A.total.qty, A.total.trx, A.total.gross]]) },
-        { name: 'Per Tindakan', rows: A.byService.map((s) => ({ 'Nama Tindakan': s.name, Kelompok: C.SERVICE_GROUPS[s.group], Kategori: s.category, Jumlah: s.qty, Transaksi: s.trx, 'Harga Rata-rata': s.avg, Pendapatan: s.gross })) },
+        { name: 'Per Tindakan', rows: A.byService.map((s) => ({ 'Nama Tindakan': s.name, Kelompok: C.SERVICE_GROUPS[s.group], Kategori: s.category, Jumlah: s.qty, 'Dengan Dokter': s.wdQty, 'Tanpa Dokter': s.qty - s.wdQty, Transaksi: s.trx, 'Harga Rata-rata': s.avg, Pendapatan: s.gross })) },
         { name: 'Per Kategori', rows: A.byCategory.map((c) => ({ Kategori: c.label, Kelompok: C.SERVICE_GROUPS[c.group], Jumlah: c.qty, Transaksi: c.trx, Pendapatan: c.gross })) },
         { name: 'Per Pelaksana', rows: A.byPerformer.map((p) => ({ Pelaksana: p.name, Peran: p.roles.map((r) => (C.ROLES[r] || {}).label || r).join(', '), Tindakan: p.qty, Transaksi: p.trx, Pendapatan: p.gross, 'Jasa Diterima': p.fee })) },
         { name: 'Per Pasien', rows: A.byPatient.map((p) => ({ Pasien: p.name, Kunjungan: p.trx, Tindakan: [...p.services.entries()].map(([n, q]) => n + (q > 1 ? ' x' + q : '')).join(', '), Jumlah: p.qty, Total: p.gross, Terakhir: p.last })) },
         { name: 'Tren', rows: A.trend.buckets.map((b, i) => Object.assign({ [A.trend.daily ? 'Tanggal' : 'Bulan']: b }, ...Object.keys(C.SERVICE_GROUPS).map((g) => ({ [C.SERVICE_GROUPS[g] + ' (jumlah)']: A.trend.series[g][i].qty, [C.SERVICE_GROUPS[g] + ' (Rp)']: A.trend.series[g][i].gross })))) },
-        { name: 'Detail', rows: A.rows.map((r) => ({ Tanggal: r.t.date, 'No. Transaksi': r.t.id, Pasien: r.t.patient, Tindakan: r.it.serviceName, Kelompok: C.SERVICE_GROUPS[r.group], Kategori: r.it.category, Unit: (C.UNITS[r.it.unit] || {}).name || r.it.unit, Jumlah: r.it.qty, Harga: r.it.price, Subtotal: r.it.gross, Pelaksana: r.performers.map((p) => p.name).join(', '), Catatan: r.t.note })) }
+        { name: 'Detail', rows: A.rows.map((r) => ({ Tanggal: r.t.date, 'No. Transaksi': r.t.id, Pasien: r.t.patient, Tindakan: r.it.serviceName, 'Dengan Dokter': r.it.withDoctor ? 'Ya' : 'Tidak', Kelompok: C.SERVICE_GROUPS[r.group], Kategori: r.it.category, Unit: (C.UNITS[r.it.unit] || {}).name || r.it.unit, Jumlah: r.it.qty, Harga: r.it.price, Subtotal: r.it.gross, Pelaksana: r.performers.map((p) => p.name).join(', '), Catatan: r.t.note })) }
       ], 'analisis-tindakan-' + u.slug(label() + '-' + grp) + '.xlsx');
     });
   }

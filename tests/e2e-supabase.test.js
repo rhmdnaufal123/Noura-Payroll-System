@@ -319,6 +319,31 @@ async function step(name, fn) {
     await A.waitForFunction(() => document.querySelectorAll('#an-svc tbody tr').length === 4);
   });
 
+  await step('tindakan dengan & tanpa dokter: master tersimpan per varian, transaksi memakai pembagian yang dipilih', async () => {
+    const ids = await A.evaluate(async (bidan) => {
+      const dr = await NP.emp.save(Object.assign(NP.emp.blank(), { name: 'dr. Pusat Satu', phone: '081299990003', unit: 'KLINIK', position: 'Dokter Umum', department: 'Pelayanan Medis', payScheme: 'service_only', baseSalary: 0 }));
+      const s = await NP.svc.save({
+        id: '', code: '', name: 'Injeksi Pusat', category: 'Dokter Umum & Bidan', unit: 'KLINIK', price: 150000, active: true, notes: '', overrides: [],
+        shares: [{ type: 'unit', target: 'KLINIK', mode: 'remainder', value: 0 }, { type: 'role', target: 'bidan', mode: 'nominal', value: 30000 }],
+        doctorShares: [{ type: 'unit', target: 'KLINIK', mode: 'remainder', value: 0 }, { type: 'role', target: 'dokter', mode: 'nominal', value: 50000 }, { type: 'role', target: 'bidan', mode: 'nominal', value: 10000 }]
+      });
+      const back = await NP.db.get('services', s.id);
+      return { dr: dr.id, sv: s.id, back: { shares: back.shares.length, doctorShares: back.doctorShares.map((x) => x.target) }, bidan };
+    }, ID.bidan);
+    assert.deepStrictEqual(ids.back, { shares: 2, doctorShares: ['KLINIK', 'dokter', 'bidan'] });
+    await go(A, 'input');
+    await A.selectOption('.item-row [data-f=serviceId]', ids.sv);
+    await A.click('.item-variant [data-wd="1"]');
+    await A.selectOption('.item-row [data-perf=dokter]', ids.dr);
+    await A.selectOption('.item-row [data-perf=bidan]', ID.bidan);
+    await A.fill('.input-form [name=patient]', 'Pasien Varian Dokter');
+    await toastAfter(A, () => A.click('[data-act=save]'), /tersimpan/);
+    const r = await sql("select i.with_doctor, a.category, a.amount::int from public.service_transaction_items i join public.service_transactions t on t.id = i.transaction_id join public.service_transaction_allocations a on a.item_id = i.id where t.patient_name = 'Pasien Varian Dokter' order by a.sort_order");
+    assert.deepStrictEqual(r, [{ with_doctor: true, category: 'klinik', amount: 90000 }, { with_doctor: true, category: 'dokter', amount: 50000 }, { with_doctor: true, category: 'bidan', amount: 10000 }]);
+    const t = await A.evaluate(async () => (await NP.trx.all()).find((x) => x.patient === 'Pasien Varian Dokter').items[0].withDoctor);
+    assert.strictEqual(t, true);
+  });
+
   await step('viewer hanya melihat laporan; tidak dapat membaca slip/penggajian rinci', async () => {
     await logout(B);
     await login(B, 'viewer@noura.test', 'Viewer#2026');
