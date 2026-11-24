@@ -374,8 +374,10 @@
     } catch (_) {}
 
     const rows = editing
-      ? editing.items.map((i) => ({ lineId: i.lineId, serviceId: i.serviceId, qty: i.qty, price: i.price, withDoctor: !!i.withDoctor, performers: Object.assign({}, i.performers) }))
+      ? editing.items.map((i) => ({ lineId: i.lineId, serviceId: i.serviceId, qty: i.qty, price: i.price, withDoctor: !!i.withDoctor, wdManual: true, performers: Object.assign({}, i.performers) }))
       : [{ lineId: u.uid('ln'), serviceId: '', qty: 1, price: 0, performers: {} }];
+    // Pasien yang juga diperiksa dokter (nama & tanggal sama) → tindakan bervarian otomatis "dengan dokter".
+    let examIdx = NP.resep ? NP.resep.examIndex({ trxs: (await trx.all()).filter((t) => !editing || t.id !== editing.id) }) : new Map();
 
     view.innerHTML = `
       <div class="page-head">
@@ -392,6 +394,7 @@
             <label class="field f-rm"><span>No. RM / kode pasien (opsional)</span><input name="patientCode" value="${u.esc(editing ? editing.patientCode : '')}" maxlength="30"></label>
           </div>
           <h4 class="sec-title">Daftar tindakan</h4>
+          <div id="wd-hint"></div>
           <div id="item-rows"></div>
           <button type="button" class="btn btn-ghost" data-act="add-row">${ui.icon('plus')}<span>Tambah tindakan lain</span></button>
           <label class="field"><span>Catatan</span><input name="note" value="${u.esc(editing ? editing.note : '')}" maxlength="200"></label>
@@ -428,12 +431,43 @@
       for (const role of rs.requiredRoles(s, r.withDoctor)) if (!r.performers[role] && lastPerf[role] && staffFor(role).some((x) => x.id === lastPerf[role])) r.performers[role] = lastPerf[role];
     }
 
+    function examHitsNow() {
+      const patient = (form.patient.value || '').trim();
+      return patient && NP.resep ? examIdx.get(NP.resep.patientKey(patient) + '|' + form.date.value) || [] : [];
+    }
+    /** Alasan otomatis "dengan dokter" untuk transaksi ini (null bila tidak ada). */
+    function examReason() {
+      const hits = examHitsNow();
+      if (hits.length) return 'pasien ini diperiksa dokter pada tanggal yang sama (' + hits.map(NP.resep.examLabel).join(', ') + ')';
+      const exam = rows.map((r) => svcMap.get(r.serviceId)).find((x) => x && NP.resep && NP.resep.isDoctorExam(x.name, x.category));
+      return exam ? 'transaksi ini memuat ' + exam.name : null;
+    }
+    function applyAuto() {
+      const on = !!examReason();
+      for (const r of rows) {
+        const sv = svcMap.get(r.serviceId);
+        if (!sv || !rs.hasDoctorVariant(sv) || r.wdManual || !!r.withDoctor === on) continue;
+        r.withDoctor = on;
+        // dokter pelaksana = dokter yang memeriksa pasien (bila diketahui)
+        const doc = examHitsNow().find((h) => h.doctorId && staffFor('dokter').some((x) => x.id === h.doctorId));
+        if (on && doc && !r.performers.dokter && rs.requiredRoles(sv, true).includes('dokter')) r.performers.dokter = doc.doctorId;
+        fillPerformers(r, sv);
+      }
+    }
+
     function drawRows() {
+      applyAuto();
+      const reason = examReason();
+      const pending = reason && rows.filter((r) => svcMap.get(r.serviceId) && rs.hasDoctorVariant(svcMap.get(r.serviceId)) && !r.withDoctor);
+      ui.$('#wd-hint', view).innerHTML = pending && pending.length
+        ? `<div class="alert alert-info">${ui.icon('info')}<div>Pembagian <b>dengan dokter</b> disarankan: ${u.esc(reason)}. ${pending.length} tindakan masih <b>tanpa dokter</b>.</div><button type="button" class="btn btn-sm btn-primary" data-act="wd-all">Jadikan dengan dokter</button></div>`
+        : '';
       rowsEl.innerHTML = rows
         .map((r, i) => {
           const s = svcMap.get(r.serviceId);
           const roles = s ? rs.requiredRoles(s, r.withDoctor) : [];
           const variant = s && rs.hasDoctorVariant(s);
+          const autoNote = variant ? (r.wdManual ? '<small class="muted">diubah manual</small>' : r.withDoctor && reason ? `<small class="wd-auto">Otomatis dengan dokter: ${u.esc(reason)}</small>` : '') : '';
           const res = computeRow(r);
           return `<div class="item-row" data-i="${i}">
             <div class="item-main">
@@ -442,7 +476,7 @@
               <label class="field item-price"><span>Harga jual</span><div class="input-prefix"><span>Rp</span><input data-f="price" data-money inputmode="numeric" value="${ui.moneyVal(r.price)}"></div></label>
               ${rows.length > 1 ? `<button type="button" class="icon-btn danger item-del" data-del="${i}" title="Hapus baris">${ui.icon('trash')}</button>` : ''}
             </div>
-            ${variant ? `<div class="item-variant"><span>Pelaksanaan</span><div class="seg" role="group" aria-label="Dengan atau tanpa dokter"><button type="button" class="seg-btn ${r.withDoctor ? '' : 'active'}" data-wd="0" aria-pressed="${!r.withDoctor}">Tanpa dokter</button><button type="button" class="seg-btn ${r.withDoctor ? 'active' : ''}" data-wd="1" aria-pressed="${!!r.withDoctor}">Dengan dokter</button></div></div>` : ''}
+            ${variant ? `<div class="item-variant"><span>Pelaksanaan</span><div class="seg" role="group" aria-label="Dengan atau tanpa dokter"><button type="button" class="seg-btn ${r.withDoctor ? '' : 'active'}" data-wd="0" aria-pressed="${!r.withDoctor}">Tanpa dokter</button><button type="button" class="seg-btn ${r.withDoctor ? 'active' : ''}" data-wd="1" aria-pressed="${!!r.withDoctor}">Dengan dokter</button></div>${autoNote}</div>` : ''}
             ${roles.length ? `<div class="item-perf">${roles.map((role) => `<label class="field"><span>${C.ROLES[role].label} pelaksana <b class="req">*</b></span><select data-perf="${role}">${ui.options(staffFor(role).map((e) => [e.id, e.name + (e.status === 'cuti' ? ' (cuti)' : '')]), r.performers[role], '— pilih ' + C.ROLES[role].label.toLowerCase() + ' —')}</select></label>`).join('')}</div>` : ''}
             ${res ? `<div class="item-preview">${res.errors.length ? `<span class="text-danger small">${res.errors.map(u.esc).join(' ')}</span>` : res.shares.map((x) => `<span class="share-chip share-${x.category}">${u.esc(x.recipientName)}: <b>${u.rp(x.amount)}</b></span>`).join('')}${res.overrideFor ? ' <small class="muted">(pembagian khusus petugas)</small>' : ''}${res.warnings.length ? `<small class="block text-warning">${res.warnings.map(u.esc).join(' ')}</small>` : ''}</div>` : ''}
           </div>`;
@@ -474,6 +508,10 @@
         ${errs ? `<div class="alert alert-danger small">${ui.icon('warn')}<div>Lengkapi data yang ditandai sebelum menyimpan.</div></div>` : ''}`;
     }
 
+    // nama pasien / tanggal berubah → cek ulang apakah pasien diperiksa dokter
+    const recheck = u.debounce(() => drawRows(), 250);
+    form.patient.addEventListener('input', recheck);
+    form.date.addEventListener('change', recheck);
     rowsEl.addEventListener('change', (e) => {
       const row = e.target.closest('.item-row');
       if (!row) return;
@@ -484,6 +522,7 @@
         r.price = s ? s.price : 0;
         r.performers = {};
         r.withDoctor = false;
+        r.wdManual = false;
         if (s) fillPerformers(r, s);
         drawRows();
       } else if (e.target.dataset.perf) {
@@ -513,6 +552,7 @@
       if (wdBtn) {
         const r = rows[+wdBtn.closest('.item-row').dataset.i];
         r.withDoctor = wdBtn.dataset.wd === '1';
+        r.wdManual = true;
         fillPerformers(r, svcMap.get(r.serviceId));
         drawRows();
         return;
@@ -543,6 +583,8 @@
       }
       try {
         const saved = await trx.save(draft, { editId: editing && editing.id, auth });
+        // transaksi yang baru disimpan ikut dihitung untuk aturan "dengan dokter" berikutnya
+        if (!editing && NP.resep) examIdx = NP.resep.examIndex({ trxs: await trx.all() });
         try {
           localStorage.setItem('noura.lastPerformers', JSON.stringify(lastPerf));
         } catch (_) {}
@@ -573,6 +615,16 @@
       }
       if (a.dataset.act === 'save') doSave(false);
       if (a.dataset.act === 'save-print') doSave(true);
+      if (a.dataset.act === 'wd-all') {
+        for (const r of rows) {
+          const sv = svcMap.get(r.serviceId);
+          if (!sv || !rs.hasDoctorVariant(sv)) continue;
+          r.withDoctor = true;
+          r.wdManual = true;
+          fillPerformers(r, sv);
+        }
+        drawRows();
+      }
       if (a.dataset.act === 'reset') {
         rows.splice(0, rows.length, { lineId: u.uid('ln'), serviceId: '', qty: 1, price: 0, performers: {} });
         drawRows();

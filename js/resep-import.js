@@ -124,6 +124,39 @@
   }
 
   const DOCTOR_FEE_RE = /PEMERIKSAAN DOKTER|KONSULTASI DOKTER|JASA DOKTER|BIAYA DOKTER|PERIKSA DOKTER/i;
+  /** Tindakan/produk yang menandakan pasien diperiksa dokter. */
+  function isDoctorExam(name, category) {
+    return DOCTOR_FEE_RE.test(String(name || '')) || category === 'Pemeriksaan dokter';
+  }
+
+  /**
+   * Indeks "pasien diperiksa dokter" per pasien+tanggal dari tiga sumber:
+   *  - db    : transaksi aktif yang memuat tindakan pemeriksaan dokter
+   *  - resep : file penebusan resep dengan biaya service > 0
+   *  - kasir : baris file penjualan kasir berupa pemeriksaan dokter
+   * Setiap hit membawa doctorId (dokter yang memeriksa) bila diketahui.
+   * @returns Map<'KUNCI PASIEN|yyyy-mm-dd', [{src, ref, text}]>
+   */
+  function examIndex(opt) {
+    opt = opt || {};
+    const m = new Map();
+    const add = (patient, date, hit) => {
+      if (!patient || !date) return;
+      const k = patientKey(patient) + '|' + date;
+      if (!k.split('|')[0]) return;
+      if (!m.has(k)) m.set(k, []);
+      if (!m.get(k).some((h) => h.src === hit.src && h.ref === hit.ref)) m.get(k).push(hit);
+    };
+    for (const t of opt.trxs || []) {
+      if (t.status !== 'active') continue;
+      const it = t.items.find((i) => isDoctorExam(i.serviceName, i.category));
+      if (it) add(t.patient, t.date, { src: 'db', ref: t.id, text: it.serviceName, doctorId: (it.performers && it.performers.dokter) || '' });
+    }
+    for (const r of opt.resepRows || []) if (r.service > 0) add(r.patient, r.date, { src: 'resep', ref: r.code, text: 'Resep ' + (r.doctor || ''), doctorId: (opt.docMap && opt.docMap[r.doctor]) || '' });
+    for (const l of opt.kasirLines || []) if (isDoctorExam(l.product, '')) add(l.patient, l.date, { src: 'kasir', ref: l.ref, text: l.product });
+    return m;
+  }
+  const examLabel = (h) => (h.src === 'db' ? 'pemeriksaan dokter ' + h.ref : h.src === 'resep' ? 'resep dokter ' + String(h.ref).replace(/^Resep\//i, '') : 'kasir ' + h.ref + ' (' + h.text + ')');
 
   /**
    * Susun rencana impor.
@@ -139,6 +172,7 @@
     const existingRefs = new Set((opt.trxs || []).filter((t) => t.status === 'active' && t.externalRef).map((t) => t.externalRef));
     const empMap = new Map((opt.employees || []).map((e) => [e.id, e]));
     const s = opt.service || null;
+    const svcById = new Map((opt.services || []).map((x) => [x.id, x]));
     const out = [];
     for (const r of rows) {
       const doctor = r.doctor || '(tanpa dokter)';
@@ -150,7 +184,11 @@
         code: r.code, externalRef: 'RESEP:' + r.code, date: r.date, time: r.time, patient: r.patient, doctor, service: r.service, total: r.total, embalase: r.embalase, products: r.products,
         empId: (opt.docMap || {})[doctor] || '',
         low: r.service < threshold, zero: !(r.service > 0),
-        kasir: ks, db: ds.map((t) => ({ id: t.id, externalRef: t.externalRef, items: t.items.map((i) => (NP.trx && NP.trx.itemLabel ? NP.trx.itemLabel(i) : i.serviceName) + (i.qty > 1 ? ' ×' + i.qty : '')) })),
+        kasir: ks,
+        db: ds.map((t) => {
+          const noDoc = t.items.filter((i) => !i.withDoctor && svcById.has(i.serviceId) && NP.rs.hasDoctorVariant(svcById.get(i.serviceId)));
+          return { id: t.id, externalRef: t.externalRef, items: t.items.map((i) => (NP.trx && NP.trx.itemLabel ? NP.trx.itemLabel(i) : i.serviceName) + (i.qty > 1 ? ' ×' + i.qty : '')), noDoctor: noDoc.map((i) => i.serviceName) };
+        }),
         already: existingRefs.has('RESEP:' + r.code),
         kasirDoctorFee: ks.some((st) => st.items.some((n) => DOCTOR_FEE_RE.test(n))),
         dbDoctorFee: !!(s && ds.some((t) => t.items.some((i) => i.serviceId === s.id))),
@@ -201,6 +239,6 @@
     return best && best[0] >= 10 ? best[1] : null;
   }
 
-  NP.resep = { parseSheet, parseWorkbook, doctorSummary, plan, patientKey, suggestService, kasirIndex };
+  NP.resep = { parseSheet, parseWorkbook, doctorSummary, plan, patientKey, suggestService, kasirIndex, isDoctorExam, examIndex, examLabel };
   if (typeof module !== 'undefined' && module.exports) module.exports = NP;
 })(typeof globalThis !== 'undefined' ? globalThis : window);

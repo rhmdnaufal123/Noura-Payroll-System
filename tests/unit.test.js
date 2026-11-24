@@ -421,6 +421,48 @@ console.log('Impor biaya dokter (penebusan resep)');
     const P3 = NP.resep.plan(rx.rows, Object.assign({}, base, { trxs, included: new Set(['Resep/RXUJI-2']) }));
     assert.strictEqual(P3.transactions.length, RF.expect.main.importable - 1, 'centang manual tetap dihormati');
   });
+  test('indeks pemeriksaan dokter: database, file resep (service > 0), dan file kasir', () => {
+    const idx = NP.resep.examIndex({
+      trxs: [{ id: 'TRX-9', date: '2026-10-06', patient: 'TN. RESEP SATU', status: 'active', items: [{ serviceName: 'Pemeriksaan Dokter', category: 'Pemeriksaan dokter' }] }, { id: 'TRX-8', date: '2026-10-06', patient: 'Batal', status: 'cancelled', items: [{ serviceName: 'Pemeriksaan Dokter' }] }],
+      resepRows: rx.rows,
+      kasirLines: [{ ref: 'SIN-X', date: '2026-10-20', patient: 'Ny. Kasir', product: 'PEMERIKSAAN DOKTER UMUM HC' }, { ref: 'SIN-Y', date: '2026-10-20', patient: 'Ny. Obat', product: 'PARACETAMOL' }]
+    });
+    const has = (p, d) => (idx.get(NP.resep.patientKey(p) + '|' + d) || []).map((h) => h.src).sort();
+    assert.deepStrictEqual(has('Tn. Resep Satu', '2026-10-06'), ['db', 'resep']);
+    assert.deepStrictEqual(has('NY PASIEN UJI 1', '2026-10-01'), ['resep']);
+    assert.deepStrictEqual(has('An. RESEP DUA', '2026-10-07'), [], 'resep Rp0 bukan pemeriksaan');
+    assert.deepStrictEqual(has('Ny. Kasir', '2026-10-20'), ['kasir']);
+    assert.deepStrictEqual(has('Ny. Obat', '2026-10-20'), []);
+    assert.deepStrictEqual(has('Batal', '2026-10-06'), [], 'transaksi batal diabaikan');
+  });
+  test('impor POS: pasien yang juga diperiksa dokter → otomatis "dengan dokter", tetap dapat diubah manual', () => {
+    const pfx = pf.build();
+    const lines = NP.pos.parseSheet(pfx.aoa).lines;
+    // semua tindakan memiliki varian dengan/tanpa dokter
+    const svcs = pf.SERVICES.map(([name, cat, price], i) => ({
+      id: 'V' + i, name, category: cat === 'HOMECARE' ? 'Homecare' : 'Dokter Umum & Bidan', unit: 'KLINIK', price, active: true, overrides: [],
+      shares: [{ type: 'unit', target: 'KLINIK', mode: 'remainder', value: 0 }],
+      doctorShares: [{ type: 'unit', target: 'KLINIK', mode: 'remainder', value: 0 }, { type: 'role', target: 'dokter', mode: 'percent', value: 10 }]
+    }));
+    const examIndex = NP.resep.examIndex({ resepRows: rx.rows, docMap: { 'dr. Contoh Dokter': 'KRY-0009' } });
+    const opt = { defaults: { dokter: 'KRY-LAIN' }, roles: { dokter: emps }, doctorMode: 'exam', examIndex };
+    const P = NP.pos.plan(lines, svcs, emps, opt);
+    const byPatient = (n) => P.transactions.find((t) => t.patient === 'Ny. PASIEN UJI ' + n);
+    // hari 1, 3, 5: pasien sama dengan resep ber-service → dengan dokter; pasien lain tanpa dokter
+    for (const n of [1, 3, 5]) assert.ok(byPatient(n).items.every((i) => i.withDoctor && i.auto && i.examHits.some((h) => h.src === 'resep')), 'pasien ' + n);
+    assert.ok(byPatient(7).items.every((i) => !i.withDoctor), 'pasien tanpa pemeriksaan dokter');
+    assert.ok(P.transactions.filter((t) => !t.patient).every((t) => t.items.every((i) => !i.withDoctor || /PEMERIKSAAN DOKTER|struk/.test(JSON.stringify(i.examHits)))), 'tanpa nama pasien tidak dicocokkan');
+    // dokter pelaksana = dokter yang memeriksa (dari resep), bukan dokter default
+    const it = byPatient(1).items[0];
+    assert.strictEqual(it.performers.dokter, 'KRY-0009');
+    // ubahan manual menang atas otomatis
+    const P2 = NP.pos.plan(lines, svcs, emps, Object.assign({}, opt, { wdOverride: new Map([[it.ovKey, false]]) }));
+    const it2 = P2.transactions.find((t) => t.patient === 'Ny. PASIEN UJI 1').items[0];
+    assert.ok(!it2.withDoctor && it2.manual && !('dokter' in it2.performers));
+    // mode lain tetap tersedia
+    const never = NP.pos.plan(lines, svcs, emps, Object.assign({}, opt, { doctorMode: 'never' }));
+    assert.ok(never.transactions.every((t) => t.items.every((i) => !i.withDoctor)));
+  });
   test('saran tindakan: "Pemeriksaan Dokter" dipilih, versi Homecare tidak', () => {
     const list = [{ id: 'A', name: 'Pemeriksaan Dokter Umum HC', category: 'Homecare', price: 300000, active: true }, { id: 'B', name: 'Pemeriksaan Dokter', category: 'Dokter Umum & Bidan', price: 100000, active: true }, { id: 'C', name: 'Suntik KB', category: 'Tindakan kebidanan', price: 65000, active: true }];
     assert.strictEqual(NP.resep.suggestService(list).id, 'B');

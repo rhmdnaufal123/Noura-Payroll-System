@@ -161,3 +161,8 @@
 .stat.stat-info { border-color: color-mix(in srgb, var(--info) 40%, transparent); background: var(--info-50); }
 @media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) .flag-db { color: #c4b5fd; } }
 :root[data-theme="dark"] .flag-db { color: #c4b5fd; }
+/* Label dengan/tanpa dokter yang dapat diklik (pratinjau impor) */
+.wd-toggle { font: inherit; font-size: 11px; font-weight: 700; padding: 1px 7px; border-radius: 6px; border: 1px dashed var(--border-strong); background: var(--surface-2); color: var(--text-2); cursor: pointer; min-height: 22px; }
+.wd-toggle.on { border-style: solid; border-color: color-mix(in srgb, var(--primary) 45%, transparent); background: color-mix(in srgb, var(--primary) 14%, transparent); color: var(--primary-ink, var(--primary)); }
+.wd-toggle:focus-visible { outline: 2px solid var(--primary); outline-offset: 1px; }
+.wd-auto { display: block; color: var(--primary-ink, var(--primary)); font-size: 11.5px; margin-top: 2px; }

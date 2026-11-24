@@ -373,6 +373,47 @@ async function step(name, fn) {
     await go('transactions');
     assert.ok(/Suntik Vitamin Uji \(dengan dokter\)/.test(await page.locator('#view').innerText()));
   });
+  await step('input tindakan: pasien yang diperiksa dokter → otomatis "dengan dokter", tetap dapat diubah', async () => {
+    const ids = await ev(async () => {
+      const s = await NP.db.all('services');
+      const e = await NP.db.all('employees');
+      const bd = e.find((x) => x.position === 'Bidan' && x.status === 'aktif' && x.name !== 'Bd. Uji Coba');
+      return { sv: s.find((x) => x.name === 'Suntik Vitamin Uji').id, kons: s.find((x) => x.name === 'Konsultasi Dokter Umum').id, dr: e.find((x) => x.name === 'dr. Siti Rahmawati').id, bd: bd.id };
+    });
+    // 1) pemeriksaan dokter untuk pasien ini hari ini
+    await go('input');
+    await page.selectOption('.item-row [data-f=serviceId]', ids.kons);
+    await page.selectOption('.item-row [data-perf=dokter]', ids.dr);
+    await page.fill('.input-form [name=patient]', 'Ny. Periksa Dokter');
+    await clickToast('[data-act=save]', /tersimpan/);
+    // 2) tindakan berikutnya untuk pasien yang sama (penulisan berbeda) → otomatis dengan dokter
+    await page.selectOption('.item-row [data-f=serviceId]', ids.sv);
+    await page.waitForSelector('.item-variant [data-wd="0"].active');
+    await page.fill('.input-form [name=patient]', 'NY. PERIKSA DOKTER');
+    await page.waitForSelector('.item-variant [data-wd="1"].active');
+    assert.ok(/Otomatis dengan dokter: pasien ini diperiksa dokter/.test(await page.locator('.item-variant').innerText()));
+    assert.strictEqual(await page.inputValue('.item-row [data-perf=dokter]'), ids.dr, 'dokter pelaksana = dokter yang memeriksa');
+    // ubah manual ke tanpa dokter → tidak ditimpa lagi oleh aturan otomatis
+    await page.click('.item-variant [data-wd="0"]');
+    await page.fill('.input-form [name=patient]', 'Ny. Periksa Dokter ');
+    await page.waitForTimeout(400);
+    assert.ok(await page.locator('.item-variant [data-wd="0"].active').count(), 'pilihan manual dipertahankan');
+    assert.ok(/diubah manual/.test(await page.locator('.item-variant').innerText()));
+    assert.ok(/Jadikan dengan dokter/.test(await page.locator('#wd-hint').innerText()), 'saran tetap ditampilkan');
+    await page.click('#wd-hint [data-act=wd-all]');
+    await page.waitForSelector('.item-row [data-perf=dokter]');
+    await page.selectOption('.item-row [data-perf=dokter]', ids.dr);
+    if (!(await page.inputValue('.item-row [data-perf=bidan]'))) await page.selectOption('.item-row [data-perf=bidan]', ids.bd);
+    await clickToast('[data-act=save]', /tersimpan/);
+    const t = await ev(async () => (await NP.db.all('transactions')).filter((x) => /periksa dokter/i.test(x.patient)).map((x) => x.items.map((i) => [i.serviceName, !!i.withDoctor])));
+    assert.deepStrictEqual(t.sort(), [[['Konsultasi Dokter Umum', false]], [['Suntik Vitamin Uji', true]]].sort());
+    // 3) pemeriksaan dokter dalam transaksi yang sama (tanpa nama pasien pun) → otomatis
+    await page.selectOption('.item-row [data-f=serviceId]', ids.kons);
+    await page.click('[data-act=add-row]');
+    await page.selectOption('.item-row >> nth=1 >> [data-f=serviceId]', ids.sv);
+    await page.waitForSelector('.item-row >> nth=1 >> .item-variant [data-wd="1"].active');
+    await page.click('[data-act=reset]');
+  });
   await step('tanpa memilih petugas → tidak bisa disimpan', async () => {
     await go('input');
     const gid = await ev(async () => (await NP.db.all('services')).find((x) => x.name === 'Konsultasi Dokter Umum').id);
@@ -772,6 +813,28 @@ async function step(name, fn) {
     // impor ulang: semua sudah pernah diimpor
     await page.waitForSelector('[data-rx=import][disabled]');
     assert.ok(/Sudah pernah diimpor/.test(await page.locator('#rx-table').innerText()));
+  });
+  await step('tab resep: tindakan pasien yang diperiksa dokter tapi tercatat tanpa dokter → diubah sekaligus', async () => {
+    const day3 = prevMonth + '-03';
+    const ids = await ev(async () => {
+      const s = await NP.db.all('services');
+      const e = await NP.db.all('employees');
+      const bd = e.find((x) => x.position === 'Bidan' && x.status === 'aktif' && x.name !== 'Bd. Uji Coba');
+      return { sv: s.find((x) => x.name === 'Suntik Vitamin Uji').id, bd: bd.id, dr: e.find((x) => x.name === 'dr. Siti Rahmawati').id };
+    });
+    const tid = await ev(async ([d, i]) => (await NP.trx.save({ date: d, patient: 'Ny. Pasien Uji 3', note: 'uji tanpa dokter', items: [{ serviceId: i.sv, qty: 1, price: 200000, withDoctor: false, performers: { bidan: i.bd } }] })).id, [day3, ids]);
+    await go('dashboard');
+    await go('bulk?tab=resep');
+    await page.waitForSelector('[data-rx=fix-wd]');
+    assert.ok(/1 transaksi tindakan/.test(await page.locator('#rx-body .alert-info').first().innerText()));
+    assert.ok(await page.locator('#rx-table a.flag-low', { hasText: 'Tercatat tanpa dokter' }).count());
+    await page.click('[data-rx=fix-wd]');
+    await modalBtn('Ubah').click();
+    await waitToast(/1 transaksi diubah menjadi dengan dokter/);
+    const t = await ev(async (id) => (await NP.trx.get(id)).items[0], tid);
+    assert.deepStrictEqual([t.withDoctor, t.performers.dokter, t.performers.bidan], [true, ids.dr, ids.bd]);
+    await page.waitForSelector('#rx-table');
+    assert.strictEqual(await page.locator('[data-rx=fix-wd]').count(), 0, 'tidak ada lagi yang perlu diubah');
   });
   await step('Data Karyawan: tombol Tambah Dokter & Tambah Bidan mengisi jabatan, unit & skema', async () => {
     await go('employees');

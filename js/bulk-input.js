@@ -349,7 +349,7 @@
   }
 
   /* ===================== Impor file POS ===================== */
-  const pos = { file: null, parsed: null, cats: null, defaults: {}, doctorMode: 'column' };
+  const pos = { file: null, parsed: null, cats: null, defaults: {}, doctorMode: 'exam', wdOverride: new Map() };
 
   /** Pilih & baca file penjualan kasir (dipakai tab Impor POS dan pembanding di tab resep). */
   async function pickKasirFile() {
@@ -360,6 +360,7 @@
     pos.file = f.name;
     pos.parsed = parsed;
     pos.cats = new Set(NP.pos.categorySummary(parsed.lines).filter((c) => c.service).map((c) => c.category));
+    pos.wdOverride = new Map();
     return true;
   }
 
@@ -392,7 +393,8 @@
     for (const k of Object.keys(C.ROLES)) roles[k] = staffFor(employees, k);
     const existingRefs = new Set(trxs.filter((t) => t.status === 'active' && t.externalRef).map((t) => t.externalRef));
     const catSum = NP.pos.categorySummary(pos.parsed.lines);
-    const P = NP.pos.plan(pos.parsed.lines, services, employees, { categories: pos.cats, defaults: pos.defaults, roles, doctorMode: pos.doctorMode });
+    const examIndex = NP.resep.examIndex({ trxs, resepRows: rx.parsed ? rx.parsed.rows : [], kasirLines: pos.parsed.lines, docMap: rx.docMap });
+    const P = NP.pos.plan(pos.parsed.lines, services, employees, { categories: pos.cats, defaults: pos.defaults, roles, doctorMode: pos.doctorMode, examIndex, wdOverride: pos.wdOverride });
     const variantUsed = P.transactions.some((t) => t.items.some((i) => rs.hasDoctorVariant(services.find((s) => s.id === i.serviceId))));
     const fresh = P.transactions.filter((t) => !existingRefs.has(t.externalRef));
     const already = P.transactions.length - fresh.length;
@@ -434,8 +436,8 @@
       </div>` : ''}
       ${variantUsed ? `<div class="card">
         <div class="card-head"><h3>Tindakan dengan / tanpa dokter</h3></div>
-        <p class="muted small">Beberapa tindakan memiliki pembagian berbeda bila dilakukan dengan dokter. Tentukan cara membacanya dari file.</p>
-        <div class="seg pos-doc" role="radiogroup" aria-label="Penentuan dengan dokter">${[['column', 'Dengan dokter bila kolom Dokter terisi'], ['always', 'Selalu dengan dokter'], ['never', 'Selalu tanpa dokter']].map(([k, l]) => `<button type="button" class="seg-btn ${pos.doctorMode === k ? 'active' : ''}" data-dmode="${k}" role="radio" aria-checked="${pos.doctorMode === k}">${l}</button>`).join('')}</div>
+        <p class="muted small">Beberapa tindakan memiliki pembagian berbeda bila dilakukan dengan dokter. Bawaan: <b>dengan dokter bila pasien (nama &amp; tanggal) juga diperiksa dokter</b> — tercatat di database, di file resep${rx.parsed ? ' (' + u.esc(rx.file) + ')' : ' (buka di tab Impor biaya dokter)'}, atau di file kasir. Setiap tindakan di pratinjau tetap dapat diubah dengan mengklik labelnya.</p>
+        <div class="seg pos-doc" role="radiogroup" aria-label="Penentuan dengan dokter">${[['exam', 'Otomatis: pasien juga diperiksa dokter'], ['column', 'Kolom Dokter terisi'], ['always', 'Selalu dengan dokter'], ['never', 'Selalu tanpa dokter']].map(([k, l]) => `<button type="button" class="seg-btn ${pos.doctorMode === k ? 'active' : ''}" data-dmode="${k}" role="radio" aria-checked="${pos.doctorMode === k}">${l}</button>`).join('')}</div>
       </div>` : ''}
       ${neededRoles.length ? `<div class="card">
         <div class="card-head"><h3>${P.unmatched.length ? '4' : '3'}. Pelaksana default</h3></div>
@@ -463,7 +465,11 @@
         { key: 'date', label: 'Tanggal', render: (t) => u.fmtDate(t.date) + (t.time ? `<small class="block muted">${t.time}</small>` : '') },
         { key: 'externalRef', label: 'Struk', render: (t) => `${u.esc(t.externalRef.replace(/^POS:/, ''))}${existingRefs.has(t.externalRef) ? ' ' + ui.badge('sudah diimpor', 'gray') : ''}` },
         { key: 'patient', label: 'Pasien', render: (t) => u.esc(t.patient || '-') + (t.doctor ? `<small class="block muted">${u.esc(t.doctor)}</small>` : '') },
-        { key: 'items', label: 'Tindakan', sortable: false, render: (t) => t.items.map((i) => `${u.esc(i.serviceName)}${i.withDoctor ? ' <span class="bk-variant doc">dengan dokter</span>' : ''}${i.qty > 1 ? ' ×' + i.qty : ''}`).join('<br>') },
+        {
+          key: 'items', label: 'Tindakan', sortable: false, render: (t) => t.items.map((i) => `${u.esc(i.serviceName)}${i.qty > 1 ? ' ×' + i.qty : ''}${i.variant
+            ? ` <button type="button" class="wd-toggle ${i.withDoctor ? 'on' : ''}" data-wdt="${u.esc(i.ovKey)}" data-wdv="${i.withDoctor ? 1 : 0}" title="${u.esc(i.manual ? 'Diubah manual — klik untuk mengganti' : i.examHits.length ? 'Otomatis: ' + i.examHits.map(NP.resep.examLabel).join(', ') : 'Klik untuk mengganti')}">${i.withDoctor ? 'dengan dokter' : 'tanpa dokter'}${i.manual ? ' · manual' : i.withDoctor && i.examHits.length ? ' · otomatis' : ''}</button>`
+            : ''}`).join('<br>')
+        },
         { key: 'gross', label: 'Total', align: 'right', render: (t) => u.rp(t.gross) }
       ],
       rows: P.transactions,
@@ -490,7 +496,16 @@
       const dm = e.target.closest('[data-dmode]');
       if (dm) {
         pos.doctorMode = dm.dataset.dmode;
+        pos.wdOverride = new Map();
         renderPos(outer);
+        return;
+      }
+      const wt = e.target.closest('[data-wdt]');
+      if (wt) {
+        pos.wdOverride.set(wt.dataset.wdt, wt.dataset.wdv !== '1');
+        const y = window.scrollY;
+        await renderPos(outer);
+        window.scrollTo(0, y);
         return;
       }
       const a = e.target.closest('[data-act]');
@@ -533,6 +548,55 @@
     });
   }
 
+
+  /**
+   * Ubah tindakan bervarian yang tercatat "tanpa dokter" menjadi "dengan dokter" pada transaksi yang ada.
+   * @param list [{id, empId}] empId = dokter pelaksana; transaksi terkunci/disetujui dilewati.
+   */
+  async function fixToDoctor(list, services, msg) {
+    const svcMap = new Map(services.map((x) => [x.id, x]));
+    const res = { done: 0, skipped: [] };
+    for (const [n, f] of list.entries()) {
+      msg && msg('Mengubah ' + (n + 1) + '/' + list.length + '…');
+      const t = await NP.trx.get(f.id);
+      if (!t || t.status !== 'active') {
+        res.skipped.push({ id: f.id, reason: 'transaksi tidak aktif' });
+        continue;
+      }
+      try {
+        if (NP.trx.checkEditable(t).locked) {
+          res.skipped.push({ id: f.id, reason: 'periode gaji terkunci' });
+          continue;
+        }
+      } catch (e) {
+        res.skipped.push({ id: f.id, reason: 'penggajian sudah disetujui' });
+        continue;
+      }
+      let bad = null;
+      const items = t.items.map((i) => {
+        const sv = svcMap.get(i.serviceId);
+        const fix = !i.withDoctor && sv && rs.hasDoctorVariant(sv);
+        const performers = Object.assign({}, i.performers);
+        if (fix) {
+          if (!performers.dokter && f.empId) performers.dokter = f.empId;
+          const miss = rs.requiredRoles(sv, true).filter((role) => !performers[role]);
+          if (miss.length) bad = (C.ROLES[miss[0]] || {}).label + ' pelaksana belum ada';
+        }
+        return { lineId: i.lineId, serviceId: i.serviceId, qty: i.qty, price: i.price, withDoctor: fix ? true : !!i.withDoctor, performers };
+      });
+      if (bad) {
+        res.skipped.push({ id: f.id, reason: bad });
+        continue;
+      }
+      try {
+        await NP.trx.save({ date: t.date, patient: t.patient, patientCode: t.patientCode, note: t.note, items }, { editId: t.id });
+        res.done++;
+      } catch (e) {
+        res.skipped.push({ id: f.id, reason: e.message });
+      }
+    }
+    return res;
+  }
 
   /* ===================== Impor biaya dokter (file Penebusan Resep) ===================== */
   const rx = { file: null, parsed: null, doctors: null, docMap: {}, serviceId: '', excluded: new Set(), included: new Set(), onlyFlagged: false };
@@ -599,7 +663,10 @@
       rx.serviceId = sg ? sg.id : '';
     }
     const service = services.find((x) => x.id === rx.serviceId) || null;
-    const P = NP.resep.plan(rx.parsed.rows, { doctors: rx.doctors, docMap: rx.docMap, service, employees, kasirLines: pos.parsed ? pos.parsed.lines : null, trxs, excluded: rx.excluded, included: rx.included });
+    const P = NP.resep.plan(rx.parsed.rows, { doctors: rx.doctors, docMap: rx.docMap, service, services, employees, kasirLines: pos.parsed ? pos.parsed.lines : null, trxs, excluded: rx.excluded, included: rx.included });
+    // transaksi pasien yang diperiksa dokter (service > 0) tetapi tindakannya tercatat TANPA dokter
+    const toFix = [];
+    for (const x of P.rows) if (x.service > 0) for (const d of x.db) if (d.noDoctor.length && !toFix.some((f) => f.id === d.id)) toFix.push({ id: d.id, empId: x.empId, patient: x.patient, items: d.noDoctor });
     const S = P.stats;
     const active = services.filter((x) => x.active);
     const byCat = u.groupBy(active, (x) => x.category);
@@ -636,6 +703,7 @@
         </div>
         <div class="rx-legend"><span><i class="rx-sw rx-sw-low"></i>Biaya service di bawah Rp100.000</span><span><i class="rx-sw rx-sw-zero"></i>Rp0 — tidak diimpor</span><span><i class="rx-sw rx-sw-dup"></i>Pasien sama (nama &amp; tanggal) di file kasir / database</span></div>
         ${P.blocking.length ? `<div class="alert alert-warning">${ui.icon('warn')}<div><b>Perlu diperbaiki sebelum impor (${P.blocking.length} resep):</b><ul>${[...new Set([].concat(...P.blocking.map((x) => x.problems)))].slice(0, 6).map((m) => `<li>${u.esc(m)}</li>`).join('')}</ul></div></div>` : ''}
+        ${toFix.length ? `<div class="alert alert-info">${ui.icon('info')}<div><b>${u.num(toFix.length)} transaksi tindakan</b> milik pasien yang diperiksa dokter (nama &amp; tanggal sama) masih tercatat <b>tanpa dokter</b>: ${toFix.slice(0, 4).map((f) => u.esc(f.patient + ' — ' + f.items.join(', '))).join('; ')}${toFix.length > 4 ? '; …' : ''}. Ubah pembagiannya menjadi <b>dengan dokter</b>? (Tetap dapat diubah lagi lewat Riwayat Transaksi › Edit.)</div><button type="button" class="btn btn-sm btn-primary" data-rx="fix-wd">Ubah ${u.num(toFix.length)} transaksi</button></div>` : ''}
         <div id="rx-table"></div>
         <div class="form-actions"><button type="button" class="btn btn-primary" data-rx="import" ${!P.transactions.length || P.blocking.length || !service ? 'disabled' : ''}>${ui.icon('check')}<span>Impor ${u.num(P.transactions.length)} biaya dokter</span></button></div>
       </div>`;
@@ -653,7 +721,7 @@
             x.already ? '<span class="flag flag-done">Sudah pernah diimpor</span>' : '',
             ...x.kasir.map((k) => `<span class="flag flag-dup" title="Struk kasir ${u.esc(k.ref)}">Kasir ${u.esc(k.ref)}${k.services.length ? ': ' + u.esc(k.services.join(', ')) : ''}${k.resepTotal ? ' · resep ' + u.rp(k.resepTotal) + (k.resepTotal === x.total ? ' ✓' : '') : ''}</span>`),
             x.kasirDoctorFee ? '<span class="flag flag-low">Kasir sudah mencatat pemeriksaan dokter</span>' : '',
-            ...x.db.map((t) => `<span class="flag flag-db">Sudah tercatat ${u.esc(t.id)}: ${u.esc(t.items.join(', '))}</span>`),
+            ...x.db.map((t) => `<span class="flag flag-db">Sudah tercatat ${u.esc(t.id)}: ${u.esc(t.items.join(', '))}</span>${t.noDoctor.length && x.service > 0 ? ` <a class="flag flag-low" href="#/input?edit=${encodeURIComponent(t.id)}" title="Buka untuk mengubah">Tercatat tanpa dokter: ${u.esc(t.noDoctor.join(', '))}</a>` : ''}`),
             x.dbDoctorFee ? '<span class="flag flag-low">Biaya dokter sudah ada di database</span>' : '',
             x.include && x.problems.length ? `<span class="flag flag-zero">${u.esc(x.problems.join(' '))}</span>` : ''
           ].filter(Boolean).join(' ') || '<span class="muted">—</span>'
@@ -702,6 +770,14 @@
           ui.toast(err.message, 'error');
         }
         rerender();
+      }
+      if (b.dataset.rx === 'fix-wd') {
+        const ok = await ui.confirm({ title: 'Ubah menjadi dengan dokter', html: `Ubah pembagian tindakan pada <b>${u.num(toFix.length)} transaksi</b> menjadi <b>dengan dokter</b>? Dokter pelaksana diambil dari pencocokan dokter di atas. Transaksi pada periode gaji yang sudah disetujui/terkunci dilewati.`, okLabel: 'Ubah' });
+        if (!ok) return;
+        const res = await ui.busy('Mengubah transaksi…', (msg) => fixToDoctor(toFix, services, msg));
+        ui.toast(u.num(res.done) + ' transaksi diubah menjadi dengan dokter' + (res.skipped.length ? '; ' + res.skipped.length + ' dilewati (' + [...new Set(res.skipped.map((x) => x.reason))].join('; ') + ')' : '') + '.', res.skipped.length ? 'warning' : undefined);
+        rerender();
+        return;
       }
       if (b.dataset.rx === 'import') {
         const n = P.transactions.length;

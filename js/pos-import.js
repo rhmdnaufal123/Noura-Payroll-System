@@ -131,7 +131,9 @@
    * @param services   master tindakan (aktif & nonaktif)
    * @param employees  karyawan
    * @param opt        { categories:Set<string> kategori POS yang diambil, defaults:{role:empId}, roles:{dokter:[emp...],...},
-   *                     doctorMode: 'column' (dengan dokter bila kolom Dokter terisi, default) | 'always' | 'never' }
+   *                     doctorMode: 'exam' (dengan dokter bila pasien juga diperiksa dokter, lihat NP.resep.examIndex) |
+   *                                 'column' (kolom Dokter terisi) | 'always' | 'never',
+   *                     examIndex: Map hasil NP.resep.examIndex, wdOverride: Map 'ref|urutan' → boolean (ubahan manual) }
    */
   function plan(lines, services, employees, opt) {
     opt = opt || {};
@@ -165,20 +167,32 @@
         continue;
       }
       const items = [];
-      for (const l of ls) {
+      // pemeriksaan dokter di struk yang sama juga dihitung
+      const examInStruk = ls.some((l) => NP.resep && NP.resep.isDoctorExam(l.service.name, l.service.category));
+      for (const [li, l] of ls.entries()) {
         const s = l.service;
         if (!s.active) problems.push({ ref, msg: '"' + s.name + '" nonaktif di Master Tindakan.' });
         if (!(l.qty >= 1) || Math.floor(l.qty) !== l.qty) problems.push({ ref, msg: '"' + l.product + '": jumlah ' + l.qty + ' tidak valid.' });
         const price = l.qty > 0 && l.subtotal > 0 && Number.isInteger(l.subtotal / l.qty) ? l.subtotal / l.qty : Math.round(l.unitPrice);
         if (!(price > 0)) problems.push({ ref, msg: '"' + l.product + '": harga 0.' });
         const mode = opt.doctorMode || 'column';
-        const withDoctor = NP.rs.effectiveWithDoctor(s, mode === 'always' || (mode === 'column' && !!l.doctor));
+        const ovKey = ref + '|' + li;
+        let hits = [];
+        if (mode === 'exam' && l.patient && NP.resep) hits = ((opt.examIndex && opt.examIndex.get(NP.resep.patientKey(l.patient) + '|' + l.date)) || []).slice();
+        if (mode === 'exam' && examInStruk && !NP.resep.isDoctorExam(s.name, s.category)) hits.push({ src: 'kasir', ref, text: 'pemeriksaan dokter di struk yang sama' });
+        const auto = mode === 'always' || (mode === 'column' && !!l.doctor) || (mode === 'exam' && hits.length > 0);
+        const manual = opt.wdOverride && opt.wdOverride.has(ovKey);
+        const withDoctor = NP.rs.effectiveWithDoctor(s, manual ? opt.wdOverride.get(ovKey) : auto);
         const performers = {};
         for (const role of NP.rs.requiredRoles(s, withDoctor)) {
           let id = null;
-          if (role === 'dokter' && l.doctor) {
-            const m = matchEmployee(l.doctor, roleStaff.dokter || []);
-            if (m) id = m.id;
+          if (role === 'dokter') {
+            const examDoc = hits.find((h) => h.doctorId);
+            if (examDoc) id = examDoc.doctorId; // dokter yang memeriksa pasien ini
+            else if (l.doctor) {
+              const m = matchEmployee(l.doctor, roleStaff.dokter || []);
+              if (m) id = m.id;
+            }
           }
           id = id || (opt.defaults && opt.defaults[role]) || null;
           if (id) performers[role] = id;
@@ -189,7 +203,7 @@
           const chk = NP.rs.compute(s, { price, qty: l.qty, performers, employees: empMap, withDoctor });
           for (const err of chk.errors) problems.push({ ref, msg: '"' + s.name + (withDoctor ? ' (dengan dokter)' : '') + '" (harga ' + u.rp(price) + '): ' + err });
         }
-        items.push({ serviceId: s.id, serviceName: s.name, category: s.category, qty: l.qty, price, withDoctor, performers, lineId: u.uid('ln') });
+        items.push({ serviceId: s.id, serviceName: s.name, category: s.category, qty: l.qty, price, withDoctor, performers, lineId: u.uid('ln'), ovKey, manual: !!manual, auto, examHits: hits, variant: NP.rs.hasDoctorVariant(s) });
       }
       const noteParts = ['Impor POS ' + ref];
       if (first.doctor) noteParts.push(first.doctor);
