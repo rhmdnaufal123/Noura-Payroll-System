@@ -550,6 +550,59 @@ async function step(name, fn) {
     const html = await download(() => page.click('#sl-actions [data-act=html]'));
     const content = fs.readFileSync(html.path, 'utf8');
     assert.ok(/SLIP GAJI/.test(content) && /TAKE HOME PAY/.test(content) && !/STR-/.test(content));
+    // cap digital pengesahan ikut di file HTML
+    assert.ok(/class="s-stamp" src="data:image\/svg\+xml;base64,/.test(content) && /Kode verifikasi/.test(content), 'cap digital di HTML');
+  });
+  await step('cap digital: tanggal & jam pengesahan, kode verifikasi, ikut di PNG/PDF; draft tanpa cap', async () => {
+    await go('payslips');
+    await page.waitForSelector('#sl-vp .slip .s-sah');
+    const sah = await page.locator('#sl-vp .s-sah').innerText();
+    const m = sah.match(/Disahkan secara digital pada (\d{1,2} \w+ \d{4}) pukul (\d{2}\.\d{2}) WIB.*Kode verifikasi ([0-9A-F]{4}-[0-9A-F]{4})/);
+    assert.ok(m, sah);
+    // isi cap: label, tanggal, jam, kode (SVG di dalam gambar)
+    const svg = await ev(() => atob(document.querySelector('#sl-vp .s-stamp').src.split(',')[1]));
+    assert.ok(/DISAHKAN/.test(svg) && new RegExp(m[2] + ' WIB').test(svg) && svg.includes(m[3]), 'isi cap');
+    // waktu cap = saat penggajian disetujui (WIB)
+    const exp = await ev(async () => {
+      const run = (await NP.payroll.runs()).find((r) => r.status !== 'draft' && r.slips.length);
+      const s = run.slips[0];
+      return { code: NP.slip.verifyCode(run, s), info: NP.slip.stampInfo(run, s), approvedAt: run.approvedAt, draft: (await NP.payroll.runs()).find((r) => r.status === 'draft' && r.slips.length) };
+    });
+    assert.ok(exp.code && /^[0-9A-F]{4}-[0-9A-F]{4}$/.test(exp.code));
+    // PNG/PDF (html2canvas): cap benar-benar tergambar → piksel hijau di area tanda tangan bertambah
+    const px = await ev(async () => {
+      const run = (await NP.payroll.runs()).find((r) => r.status !== 'draft' && r.slips.length);
+      const s = run.slips[0];
+      const green = async (on) => {
+        const old = NP.state.settings.slip.stampEnabled;
+        NP.state.settings.slip.stampEnabled = on;
+        const c = await NP.exp.toCanvas(NP.slip.html(run, s), 794);
+        NP.state.settings.slip.stampEnabled = old;
+        const d = c.getContext('2d').getImageData(0, Math.floor(c.height * 0.6), Math.floor(c.width / 2), Math.floor(c.height * 0.4)).data;
+        let n = 0;
+        for (let i = 0; i < d.length; i += 4) if (d[i + 1] > d[i] + 40 && d[i + 1] > d[i + 2] + 20) n++;
+        return n;
+      };
+      return { on: await green(true), off: await green(false) };
+    });
+    assert.ok(px.on - px.off > 3000, 'cap tidak tergambar di PNG/PDF: ' + JSON.stringify(px));
+    // verifikasi kode di halaman Slip Gaji
+    await page.click('[data-act=verify]');
+    await page.fill('.modal [name=v]', m[3].toLowerCase());
+    await modalBtn('Periksa').click();
+    await page.waitForSelector('.modal-head:has-text("Slip sah")');
+    await modalBtn('Tampilkan slip').click();
+    await page.click('[data-act=verify]');
+    await page.fill('.modal [name=v]', '0000-0000');
+    await modalBtn('Periksa').click();
+    await page.waitForSelector('.modal-head:has-text("Kode tidak dikenal")');
+    await modalBtn('Tutup').click();
+    // slip draft tidak diberi cap
+    const draftHtml = await ev(async () => {
+      const run = (await NP.payroll.runs()).find((r) => r.status === 'draft' && r.slips.length);
+      return run ? NP.slip.html(run, run.slips[0]) : null;
+    });
+    if (draftHtml) assert.ok(!/s-stamp/.test(draftHtml) && /DRAFT/.test(draftHtml));
   });
   await step('unduh seluruh slip dalam ZIP', async () => {
     const z = await download(() => page.click('[data-act=zip]'));
@@ -630,9 +683,11 @@ async function step(name, fn) {
       await ev(async () => {
         for (const s of await NP.svc.all()) if (/^pemeriksaan asam urat$/i.test(s.name)) await NP.svc.save(Object.assign({}, s, { name: s.name + ' (tarif lama)' }));
       });
-      await page.click('.pos-cats input[data-cat="HOMECARE"]');
-      await page.click('.pos-cats input[data-cat="HOMECARE"]');
-      await page.waitForSelector('.pos-cats');
+      // render ulang pratinjau (lepas lalu centang lagi), menunggu setiap render selesai
+      await page.uncheck('.pos-cats input[data-cat="HOMECARE"]');
+      await page.waitForFunction(() => { const c = document.querySelector('.pos-cats input[data-cat="HOMECARE"]'); return c && !c.checked; });
+      await page.check('.pos-cats input[data-cat="HOMECARE"]');
+      await page.waitForFunction(() => { const c = document.querySelector('.pos-cats input[data-cat="HOMECARE"]'); return c && c.checked && !/melebihi harga jual/.test(document.querySelector('#pos-body').innerText); });
     }
     const cats = await page.locator('.pos-cats input:checked').evaluateAll((els) => els.map((e) => e.dataset.cat).sort());
     assert.deepStrictEqual(cats, ['DOKTER DAN BIDAN', 'HOMECARE']);
@@ -717,6 +772,41 @@ async function step(name, fn) {
     // impor ulang: semua sudah pernah diimpor
     await page.waitForSelector('[data-rx=import][disabled]');
     assert.ok(/Sudah pernah diimpor/.test(await page.locator('#rx-table').innerText()));
+  });
+  await step('Data Karyawan: tombol Tambah Dokter & Tambah Bidan mengisi jabatan, unit & skema', async () => {
+    await go('employees');
+    await page.click('[data-act=add-dokter]');
+    await page.waitForSelector('.modal-head:has-text("Tambah Dokter")');
+    await page.click('.emp-form [data-tab=pekerjaan]');
+    assert.deepStrictEqual([await page.inputValue('.emp-form [name=unit]'), await page.inputValue('.emp-form [name=position]'), await page.inputValue('.emp-form [name=department]')], ['KLINIK', 'Dokter Umum', 'Pelayanan Medis']);
+    assert.ok(await page.locator('.emp-form [data-tab=nakes]').isVisible(), 'tab Tenaga Kesehatan tampil');
+    await page.click('.emp-form [data-tab=pribadi]');
+    await page.fill('.emp-form [name=name]', 'dr. Uji Tambahan');
+    await page.fill('.emp-form [name=phone]', '081277770001');
+    await page.click('.emp-form [data-tab=nakes]');
+    await page.fill('.emp-form [name=str]', 'STR-UJI-1');
+    await page.fill('.emp-form [name=sip]', 'SIP-UJI-1');
+    await modalBtn('Simpan').click();
+    await page.waitForSelector('.modal-backdrop', { state: 'detached' });
+    const d = await ev(async () => (await NP.db.all('employees')).find((x) => x.name === 'dr. Uji Tambahan'));
+    assert.deepStrictEqual([d.unit, d.position, d.payScheme, d.str, d.sip], ['KLINIK', 'Dokter Umum', 'service_only', 'STR-UJI-1', 'SIP-UJI-1']);
+    // tautan langsung dari halaman impor
+    await page.goto(BASE + '#/employees?add=bidan');
+    await page.waitForSelector('.modal-head:has-text("Tambah Bidan")');
+    await page.fill('.emp-form [name=name]', 'Bd. Uji Tambahan');
+    await page.fill('.emp-form [name=phone]', '081277770002');
+    assert.ok(/Isi gaji pokok/.test(await page.locator('.emp-form .alert-info').innerText()));
+    await page.click('.emp-form [data-tab=gaji]');
+    await page.fill('.emp-form [name=baseSalary]', '2100000');
+    await modalBtn('Simpan').click();
+    await page.waitForSelector('.modal-backdrop', { state: 'detached' });
+    const b = await ev(async () => (await NP.db.all('employees')).find((x) => x.name === 'Bd. Uji Tambahan'));
+    assert.deepStrictEqual([b.unit, b.position, b.department, b.payScheme], ['KLINIK', 'Bidan', 'Kebidanan', 'monthly_service']);
+    // bidan baru langsung bisa dipilih sebagai pelaksana
+    await go('input');
+    const sid = await ev(async () => (await NP.db.all('services')).find((x) => x.name === 'Pemeriksaan Gula Darah').id);
+    await page.selectOption('.item-row [data-f=serviceId]', sid);
+    assert.ok(await page.locator('.item-row [data-perf=bidan] option', { hasText: 'Bd. Uji Tambahan' }).count());
   });
   await step('input tindakan di iPad: kolom tanggal tidak menimpa nama pasien', async () => {
     for (const vp of [{ width: 1180, height: 820 }, { width: 820, height: 1180 }, { width: 1366, height: 900 }]) {

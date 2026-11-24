@@ -440,7 +440,7 @@
       ${neededRoles.length ? `<div class="card">
         <div class="card-head"><h3>${P.unmatched.length ? '4' : '3'}. Pelaksana default</h3></div>
         <p class="muted small">Dipakai untuk tindakan yang pembagiannya membutuhkan pelaksana. Kolom <b>Dokter</b> di file dicocokkan otomatis dengan nama dokter di Data Karyawan.</p>
-        <div class="grid-3">${neededRoles.map((role) => `<label class="field"><span>${C.ROLES[role].label} pelaksana default</span><select data-def="${role}">${ui.options(roles[role].map((e) => [e.id, e.name]), pos.defaults[role], '— pilih ' + C.ROLES[role].label.toLowerCase() + ' —')}</select></label>`).join('')}</div>
+        <div class="grid-3">${neededRoles.map((role) => `<label class="field"><span>${C.ROLES[role].label} pelaksana default</span><select data-def="${role}">${ui.options(roles[role].map((e) => [e.id, e.name]), pos.defaults[role], '— pilih ' + C.ROLES[role].label.toLowerCase() + ' —')}</select>${!roles[role].length && NP.emp.PRESETS[role] && NP.sec.can('employees.edit') ? `<a class="small" href="#/employees?add=${role}">+ Tambah ${C.ROLES[role].label.toLowerCase()} di Data Karyawan</a>` : ''}</label>`).join('')}</div>
       </div>` : ''}
       <div class="card">
         <div class="card-head"><h3>Pratinjau impor</h3><small class="muted">${u.esc(pos.file)}</small></div>
@@ -616,7 +616,7 @@
             <td class="ta-right">${u.num(d.count)}</td><td class="ta-right">${u.rp(d.service)}</td>
             <td><select data-docmap="${u.esc(d.doctor)}" aria-label="Karyawan untuk ${u.esc(d.doctor)}">${ui.options(doctorsStaff.map((e) => [e.id, e.name]), rx.docMap[d.doctor], '— tidak dicocokkan —')}</select></td></tr>`).join('')}
         </tbody></table></div>
-        ${doctorsStaff.length ? '' : `<div class="alert alert-warning">${ui.icon('warn')}<div>Belum ada karyawan berjabatan <b>Dokter Umum</b> di Data Karyawan. Tambahkan dokter terlebih dahulu agar biaya pemeriksaan tercatat sebagai jasa dokter.</div></div>`}
+        ${doctorsStaff.length ? '' : `<div class="alert alert-warning">${ui.icon('warn')}<div>Belum ada karyawan berjabatan <b>Dokter Umum</b> di Data Karyawan. Tambahkan dokter terlebih dahulu agar biaya pemeriksaan tercatat sebagai jasa dokter.</div>${NP.sec.can('employees.edit') ? `<a class="btn btn-sm btn-primary" href="#/employees?add=dokter">${ui.icon('plus')}<span>Tambah Dokter</span></a>` : ''}</div>`}
       </div>
       <div class="card">
         <div class="card-head"><h3>3. Tindakan untuk biaya pemeriksaan</h3></div>

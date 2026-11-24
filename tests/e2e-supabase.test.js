@@ -222,6 +222,12 @@ async function step(name, fn) {
     await B.waitForSelector('.slip .s-head');
     const [d] = await Promise.all([B.waitForEvent('download', { timeout: 60000 }), B.click('#sl-actions [data-act=pdf]')]);
     assert.ok(fs.statSync(await d.path()).size > 20000);
+    // cap digital: waktu pengesahan = approved_at di server (WIB)
+    const sah = await B.locator('#sl-vp .s-sah').innerText();
+    const srvTs = (await sql('select extract(epoch from approved_at)::bigint t from public.payroll_periods where id = $1', [ID.run]))[0].t * 1000;
+    const want = new Intl.DateTimeFormat('id-ID', { timeZone: 'Asia/Jakarta', hour: '2-digit', minute: '2-digit', hour12: false }).format(new Date(Number(srvTs))).replace(':', '.');
+    assert.ok(new RegExp('pukul ' + want.replace('.', '\\.') + ' WIB').test(sah) && /Kode verifikasi [0-9A-F]{4}-[0-9A-F]{4}/.test(sah), sah + ' / ' + want);
+    assert.strictEqual(await B.locator('#sl-vp img.s-stamp').count(), 1);
   });
 
   console.log('Penguncian & koreksi dengan otorisasi administrator');
