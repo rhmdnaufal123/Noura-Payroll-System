@@ -1,6 +1,6 @@
 /* Noura Payroll — service worker: cache aset aplikasi agar dapat dibuka offline (PWA).
  * Data tetap di IndexedDB; service worker hanya menyimpan file aplikasi. */
-const CACHE = 'noura-payroll-v1.0.0';
+const CACHE = 'noura-payroll-v1.0.1';
 const ASSETS = [
   './', './index.html', './manifest.json',
   './css/style.css', './css/dashboard.css', './css/employee.css', './css/transaction.css', './css/payroll.css', './css/report.css', './css/print.css',
@@ -9,7 +9,7 @@ const ASSETS = [
   './js/payroll.js', './js/payslip.js', './js/reports.js', './js/dashboard.js', './js/settings.js', './js/demo-data.js', './js/app.js',
   './vendor/chart.umd.min.js', './vendor/xlsx.full.min.js', './vendor/jspdf.umd.min.js', './vendor/jspdf.plugin.autotable.min.js',
   './vendor/html2canvas.min.js', './vendor/jszip.min.js',
-  './assets/logo.png', './assets/icon-192.png', './assets/icon-512.png', './assets/icon-maskable-512.png'
+  './assets/logo.png', './assets/logo-full.png', './assets/icon-192.png', './assets/icon-512.png', './assets/icon-maskable-512.png'
 ];
 
 self.addEventListener('install', (e) => {

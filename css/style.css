@@ -403,3 +403,9 @@ body.modal-open { overflow: hidden; }
   .tbl { font-size: 13px; }
   .toast-wrap { left: 12px; right: 12px; bottom: 12px; max-width: none; }
 }
+/* Logo resmi Apotek Noura */
+.auth-brand-full { flex-direction: column; align-items: center; gap: 8px; text-align: center; padding: 4px 0 6px; }
+.auth-wordmark { width: 100%; max-width: 280px; height: auto; }
+.auth-brand-full .auth-sub { letter-spacing: .22em; font-weight: 700; color: var(--muted); }
+:root[data-theme="dark"] .auth-wordmark { background: #fff; border-radius: 12px; padding: 10px 14px; }
+@media (prefers-color-scheme: dark) { :root:where(:not([data-theme="light"])) .auth-wordmark { background: #fff; border-radius: 12px; padding: 10px 14px; } }

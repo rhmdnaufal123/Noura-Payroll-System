@@ -194,10 +194,9 @@
       el.className = 'auth-screen';
       el.innerHTML = `
         <form class="auth-card" autocomplete="on">
-          <div class="auth-brand">
-            <img src="${(s && s.company.logo) || 'assets/logo.png'}" alt="" class="auth-logo">
-            <div><div class="auth-title">NOURA PAYROLL</div><div class="auth-sub">Management System</div></div>
-          </div>
+          ${s && s.company.logo
+            ? `<div class="auth-brand"><img src="${s.company.logo}" alt="" class="auth-logo"><div><div class="auth-title">NOURA PAYROLL</div><div class="auth-sub">Management System</div></div></div>`
+            : `<div class="auth-brand auth-brand-full"><img src="assets/logo-full.png" alt="Apotek Noura" class="auth-wordmark"><div class="auth-sub">PAYROLL MANAGEMENT SYSTEM</div></div>`}
           <h2>${opts.locked ? 'Sesi Terkunci' : 'Masuk ke Aplikasi'}</h2>
           <p class="muted">${opts.locked ? 'Aplikasi dikunci otomatis karena tidak ada aktivitas. Masukkan kata sandi untuk melanjutkan.' : 'Gunakan akun yang diberikan administrator.'}</p>
           <label class="field"><span>Nama pengguna</span><input name="username" autocomplete="username" required value="${opts.locked && current ? u.esc(current.username) : ''}" ${opts.locked ? 'readonly' : ''}></label>
