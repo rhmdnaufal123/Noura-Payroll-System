@@ -1,0 +1,59 @@
+/* Noura Payroll — generate payroll, riwayat penggajian, slip gaji, rekap jasa. */
+.stepper-nav { list-style: none; display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; padding: 0; margin: 0 0 16px; counter-reset: s; }
+.stepper-nav li { display: flex; align-items: center; gap: 10px; padding: 10px 12px; background: var(--surface); border: 1px solid var(--border); border-radius: 12px; color: var(--muted); font-size: 13px; font-weight: 600; }
+.stepper-nav li b { width: 28px; height: 28px; border-radius: 50%; background: var(--surface-2); border: 1px solid var(--border-strong); display: flex; align-items: center; justify-content: center; flex: none; }
+.stepper-nav li.active { border-color: var(--primary); color: var(--text); box-shadow: 0 0 0 3px color-mix(in srgb, var(--primary) 15%, transparent); }
+.stepper-nav li.active b, .stepper-nav li.done b { background: var(--primary); color: #fff; border-color: var(--primary); }
+.wiz-foot { display: flex; justify-content: space-between; gap: 10px; margin-top: 18px; padding-top: 14px; border-top: 1px solid var(--border); flex-wrap: wrap; }
+.recon-mini { display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 10px; margin-bottom: 14px; }
+.recon-mini > div { display: grid; grid-template-columns: auto 1fr; gap: 2px 10px; align-items: center; background: var(--surface-2); border: 1px solid var(--border); border-radius: 12px; padding: 10px 12px; }
+.recon-mini > div .ico { grid-row: span 2; color: var(--primary-ink); }
+.recon-mini > div.warn .ico { color: var(--warning); }
+.recon-mini span { font-size: 12px; color: var(--muted); }
+.recon-mini small { grid-column: 2; color: var(--muted); }
+.grid-input-wrap { max-height: 62vh; overflow: auto; }
+.tbl-grid th { position: sticky; top: 0; z-index: 2; }
+.tbl-grid td { padding: 6px; }
+.tbl-grid input { min-width: 74px; padding: 6px 8px; min-height: 36px; text-align: right; }
+.tbl-grid input[data-money] { min-width: 108px; }
+.tbl-grid td.edited input { background: var(--warning-50); border-color: #f59e0b; }
+.tbl-grid td.dim input { opacity: .45; }
+.sticky-col { position: sticky; left: 0; background: var(--surface); z-index: 1; min-width: 170px; }
+.tbl-grid th.sticky-col { z-index: 3; background: var(--surface-2); }
+.recap-grid .panel { margin-bottom: 14px; }
+.confirm-box { max-width: 860px; }
+.confirm-box h3 { margin-bottom: 14px; }
+.run-head { display: flex; flex-wrap: wrap; gap: 8px 16px; align-items: center; margin-bottom: 14px; color: var(--text-2); }
+.action-bar { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 14px; }
+/* slip */
+.slip-layout { display: grid; grid-template-columns: 280px minmax(0, 1fr); gap: 16px; align-items: start; }
+.slip-list { display: flex; flex-direction: column; gap: 6px; max-height: 75vh; overflow-y: auto; }
+.slip-item { display: grid; grid-template-columns: 1fr auto; text-align: left; gap: 0 8px; padding: 10px 12px; border: 1px solid var(--border); border-radius: 12px; background: var(--surface); cursor: pointer; font-family: inherit; color: var(--text); }
+.slip-item small { color: var(--muted); grid-column: 1; }
+.slip-item span { grid-row: 1 / span 2; grid-column: 2; align-self: center; font-weight: 700; font-size: 13px; }
+.slip-item.active { border-color: var(--primary); background: var(--primary-50); }
+.slip-actions { display: flex; justify-content: space-between; align-items: center; gap: 8px; flex-wrap: wrap; margin-bottom: 10px; }
+.slip-viewport { position: relative; width: 100%; overflow: hidden; background: #e5e7eb; border-radius: 12px; padding: 0; }
+.slip-scale { transform-origin: top left; width: 794px; box-shadow: 0 4px 20px rgba(0, 0, 0, .12); }
+/* rekap jasa */
+.recap-lines { border: 1px solid var(--border); border-radius: 12px; overflow: hidden; margin-bottom: 12px; }
+.recap-line { display: grid; grid-template-columns: minmax(0, 1.2fr) minmax(0, 1.4fr) auto; gap: 10px; padding: 9px 14px; border-bottom: 1px solid var(--border); font-size: 13.5px; }
+.recap-line > span:nth-child(2) { color: var(--muted); }
+.recap-line.total { background: var(--primary-50); font-weight: 700; border-bottom: 0; }
+.checklist { display: flex; flex-direction: column; gap: 8px; }
+.check-item { display: flex; gap: 12px; padding: 12px 14px; border-radius: 12px; border: 1px solid var(--border); background: var(--surface-2); }
+.check-item p { margin: 2px 0 0; }
+.check-item > .ico { width: 22px; height: 22px; }
+.check-item.ok > .ico { color: var(--primary-ink); }
+.check-item.warn { border-color: #fcd34d; } .check-item.warn > .ico { color: var(--warning); }
+.check-item.bad { border-color: #fca5a5; } .check-item.bad > .ico { color: var(--danger); }
+.worklog-form .btn { margin-top: 2px; }
+@media (max-width: 900px) {
+  .stepper-nav { grid-template-columns: repeat(4, auto); overflow-x: auto; }
+  .stepper-nav li span { display: none; }
+  .stepper-nav li.active span { display: inline; }
+  .slip-layout { grid-template-columns: minmax(0, 1fr); }
+  .slip-list { max-height: 220px; }
+  .recap-line { grid-template-columns: 1fr auto; }
+  .recap-line > span:nth-child(2) { grid-column: 1; font-size: 12px; }
+}

@@ -1,0 +1,52 @@
+# CI: uji unit, uji database (migrasi + RLS + RPC di PostgreSQL), dan uji browser end-to-end.
+name: CI
+on:
+  push:
+    branches: ['**']
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: postgres
+        ports: ['5432:5432']
+        options: >-
+          --health-cmd "pg_isready -U postgres" --health-interval 5s --health-timeout 5s --health-retries 10
+    env:
+      PGHOST: localhost
+      PGUSER: postgres
+      PGPASSWORD: postgres
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - name: Pasang dependensi uji
+        run: npm install --no-audit --no-fund
+      - name: Seed & setup.sql sesuai sumbernya
+        run: node scripts/generate-seed.mjs && node scripts/build-setup-sql.mjs && git diff --exit-code supabase/seed.sql supabase/setup.sql
+      - name: Uji unit
+        run: node tests/unit.test.js
+      - name: Pasang klien PostgreSQL
+        run: sudo apt-get update -q && sudo apt-get install -yq postgresql-client
+      - name: Uji database (migrasi, RLS, RPC)
+        run: PGDATABASE=noura_test bash tests/db/reset.sh && PGDATABASE=noura_test node tests/db/db.test.js
+      - name: Pasang Chromium untuk Playwright
+        run: npx playwright install --with-deps chromium
+      - name: Uji browser mode lokal
+        run: mkdir -p e2e-shots && E2E_SHOTS=e2e-shots node tests/e2e.test.js
+      - name: Uji browser mode Supabase
+        if: ${{ !cancelled() }}
+        run: mkdir -p e2e-shots && E2E_SHOTS=e2e-shots PGDATABASE=noura_e2e node tests/e2e-supabase.test.js
+      - name: Simpan screenshot uji yang gagal
+        if: ${{ failure() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: e2e-screenshots
+          path: e2e-shots
+          if-no-files-found: ignore
+          retention-days: 7
