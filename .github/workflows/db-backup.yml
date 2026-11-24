@@ -16,18 +16,26 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Periksa secrets
+        id: check
         env:
           DB: ${{ secrets.SUPABASE_DB_URL }}
           PASS: ${{ secrets.BACKUP_PASSPHRASE }}
         run: |
-          if [ -z "$DB" ] || [ -z "$PASS" ]; then echo "::error::SUPABASE_DB_URL dan BACKUP_PASSPHRASE wajib diisi"; exit 1; fi
+          if [ -z "$DB" ] || [ -z "$PASS" ]; then
+            echo "::notice::Backup dilewati: isi secrets SUPABASE_DB_URL dan BACKUP_PASSPHRASE untuk mengaktifkannya."
+            echo "ready=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "ready=true" >> "$GITHUB_OUTPUT"
+          fi
       - name: Pasang pg_dump 17
+        if: steps.check.outputs.ready == 'true'
         run: |
           sudo apt-get update -q
           sudo apt-get install -yq postgresql-common
           sudo /usr/share/postgresql-common/pgdg/apt.postgresql.org.sh -y
           sudo apt-get install -yq postgresql-client-17
       - name: Dump & enkripsi
+        if: steps.check.outputs.ready == 'true'
         env:
           DB: ${{ secrets.SUPABASE_DB_URL }}
           PASS: ${{ secrets.BACKUP_PASSPHRASE }}
@@ -41,7 +49,8 @@ jobs:
           gpg --batch --yes --pinentry-mode loopback --passphrase "$PASS" --symmetric --cipher-algo AES256 -o noura-backup-$STAMP.tar.gz.gpg backup-$STAMP.tar.gz
           rm -rf backup backup-$STAMP.tar.gz
           echo "STAMP=$STAMP" >> "$GITHUB_ENV"
-      - uses: actions/upload-artifact@v4
+      - if: steps.check.outputs.ready == 'true'
+        uses: actions/upload-artifact@v4
         with:
           name: noura-backup-${{ env.STAMP }}
           path: noura-backup-*.tar.gz.gpg
