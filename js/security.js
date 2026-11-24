@@ -92,6 +92,7 @@
     'trx.editOwn': AFO,
     'trx.cancel': AF,
     'revenue.view': AFV,
+    'analysis.view': ALL,
     'income.view': AF,
     'worklog.edit': AF,
     'payroll.config': A,

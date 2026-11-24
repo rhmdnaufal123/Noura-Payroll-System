@@ -253,5 +253,120 @@ test('komponen dinonaktifkan tidak dihitung', () => {
   assert.ok(!r.earnings.find((e) => e.code === 'T_MAKAN'));
 });
 
+console.log('Impor POS, input bulanan & analisis tindakan');
+{
+  // modul halaman memakai NP.ui/NP.pages hanya saat dirender; stub minimal agar dapat dimuat di Node
+  NP.ui = NP.ui || {};
+  NP.pages = NP.pages || {};
+  js('pos-import.js');
+  js('bulk-input.js');
+  js('analysis.js');
+  const fx = require('./support/pos-fixture.js');
+  const C = NP.C;
+  const F = fx.build();
+  const parsed = NP.pos.parseSheet(F.aoa);
+  // master tindakan: semua produk fixture, sebagian membutuhkan bidan / dokter
+  const services = fx.SERVICES.map(([name, cat, price], i) => ({
+    id: 'TND-' + String(i + 1).padStart(4, '0'), code: 'TND-' + String(i + 1).padStart(4, '0'), name: name.toLowerCase().replace(/\b\w/g, (c) => c.toUpperCase()), price, active: true, unit: 'APT',
+    category: cat === 'HOMECARE' ? 'Homecare' : 'Dokter Umum & Bidan',
+    shares: /SUNTIK KB/.test(name) ? [{ type: 'unit', target: 'APT', mode: 'nominal', value: 45000 }, { type: 'role', target: 'bidan', mode: 'nominal', value: 20000 }]
+      : /^PEMERIKSAAN DOKTER$/.test(name) ? [{ type: 'unit', target: 'APT', mode: 'percent', value: 60 }, { type: 'role', target: 'dokter', mode: 'percent', value: 40 }]
+      : [{ type: 'unit', target: 'APT', mode: 'remainder', value: 0 }],
+    overrides: []
+  }));
+  const emps = [{ id: 'KRY-0001', name: 'dr. Contoh Dokter, M.Kes', position: 'Dokter Umum', status: 'aktif' }, { id: 'KRY-0002', name: 'Bd. Bidan Uji', position: 'Bidan', status: 'aktif' }];
+  const roles = { dokter: [emps[0]], bidan: [emps[1]] };
+
+  test('format tanggal POS "1 Okt 2026 pukul 08.06" & variasinya', () => {
+    assert.strictEqual(NP.pos.parseDate('1 Okt 2026 pukul 08.06'), '2026-10-01');
+    assert.strictEqual(NP.pos.parseDate('24 Agu 2026'), '2026-08-24');
+    assert.strictEqual(NP.pos.parseDate('2026-12-05'), '2026-12-05');
+    assert.strictEqual(NP.pos.parseDate('05/12/2026'), '2026-12-05');
+    assert.strictEqual(NP.pos.parseDate(46296), '2026-10-01');
+    assert.strictEqual(NP.pos.parseDate('bukan tanggal'), null);
+  });
+  test('membaca sheet Penjualan: periode, baris lanjutan struk mewarisi kode struk & pasien', () => {
+    assert.strictEqual(parsed.kind, 'penjualan');
+    assert.deepStrictEqual([parsed.meta.from, parsed.meta.to], ['2026-10-01', '2026-10-28']);
+    const cont = parsed.lines.find((l, i) => i > 0 && parsed.lines[i - 1].ref === l.ref);
+    assert.ok(cont && cont.ref && cont.date, 'baris lanjutan');
+    const cats = NP.pos.categorySummary(parsed.lines);
+    const db = cats.find((c) => c.category === 'DOKTER DAN BIDAN');
+    const hc = cats.find((c) => c.category === 'HOMECARE');
+    assert.deepStrictEqual([db.qty, db.total, hc.qty, hc.total], [47, 4817000, 5, 1510000]);
+    assert.ok(db.service && hc.service && !cats.find((c) => c.category === 'ASAM LAMBUNG').service, 'obat tidak dianggap tindakan');
+  });
+  test('rencana impor: jumlah sama dengan file (52 tindakan, Rp6.327.000), obat diabaikan', () => {
+    const P = NP.pos.plan(parsed.lines, services, emps, { defaults: { bidan: 'KRY-0002' }, roles });
+    assert.deepStrictEqual(P.unmatched, []);
+    assert.deepStrictEqual(P.problems, []);
+    assert.strictEqual(P.transactions.length, F.expect.transactions);
+    assert.strictEqual(u.sum(P.transactions, (t) => t.qty), 52);
+    assert.strictEqual(u.sum(P.transactions, (t) => t.gross), 6327000);
+    assert.ok(P.transactions.every((t) => /^POS:SIN-/.test(t.externalRef) && t.items.every((i) => !/KOMIX|PLANTACID/.test(i.serviceName))));
+    const kb = P.transactions.find((t) => t.items.some((i) => i.serviceName === 'Suntik Kb'));
+    assert.deepStrictEqual(kb.items.find((i) => i.serviceName === 'Suntik Kb').performers, { bidan: 'KRY-0002' });
+    const dok = P.transactions.find((t) => t.items.some((i) => i.serviceName === 'Pemeriksaan Dokter'));
+    if (dok.doctor) assert.deepStrictEqual(dok.items.find((i) => i.serviceName === 'Pemeriksaan Dokter').performers, { dokter: 'KRY-0001' }, 'kolom Dokter dicocokkan dengan nama karyawan (gelar diabaikan)');
+    assert.strictEqual(P.transactions.filter((t) => t.patient).length, F.expect.withPatient);
+  });
+  test('rencana impor: tindakan tanpa master & pelaksana kosong dilaporkan', () => {
+    const P = NP.pos.plan(parsed.lines, services.slice(2), emps, { roles: {} });
+    assert.deepStrictEqual(P.unmatched.map((x) => [x.name, x.category, x.price, x.qty]), [['PAKET PEMERIKSAAN', 'Dokter Umum & Bidan', 100000, 5], ['PEMERIKSAAN ASAM URAT', 'Dokter Umum & Bidan', 28000, 4]]);
+    assert.ok(P.problems.some((p) => /Bidan pelaksana/.test(p.msg)));
+    const hc = NP.pos.plan(parsed.lines, [], emps, {}).unmatched.filter((x) => x.category === 'Homecare');
+    assert.strictEqual(u.sum(hc, (x) => x.qty), 5);
+  });
+  test('kelompok analisis: Homecare, Dokter Umum & Bidan, Farmasi & Lainnya', () => {
+    assert.strictEqual(C.serviceGroup('Homecare', 'Apa saja'), 'homecare');
+    assert.strictEqual(C.serviceGroup('Tindakan medis', 'Infus Multivitamin HC'), 'homecare');
+    assert.strictEqual(C.serviceGroup('Pemeriksaan laboratorium sederhana', 'Asam Urat'), 'dokter_bidan');
+    assert.strictEqual(C.serviceGroup('Tindakan kebidanan', 'Suntik KB'), 'dokter_bidan');
+    assert.strictEqual(C.serviceGroup('Penjualan produk', 'Masker'), 'lainnya');
+    assert.ok(C.SERVICE_CATEGORIES.includes('Dokter Umum & Bidan') && C.SERVICE_CATEGORIES.includes('Homecare'));
+  });
+  test('tabel bulanan: satu transaksi per tanggal terisi, maks. 50 tindakan per transaksi', () => {
+    const svcMap = new Map(services.map((s) => [s.id, s]));
+    const empMap = new Map(emps.map((e) => [e.id, e]));
+    const rows = [
+      { serviceId: services[0].id, price: 100000, performers: {}, q: { 1: 2, 15: 1 } },
+      { serviceId: services[7].id, price: 65000, performers: { bidan: 'KRY-0002' }, q: { 1: 1, 3: 4 } }
+    ];
+    const r = NP.bulk.buildFromGrid('2026-10', rows, svcMap, empMap);
+    assert.deepStrictEqual(r.errors, []);
+    assert.deepStrictEqual(r.list.map((t) => [t.date, t.items.map((i) => i.qty)]), [['2026-10-01', [2, 1]], ['2026-10-03', [4]], ['2026-10-15', [1]]]);
+    const miss = NP.bulk.buildFromGrid('2026-10', [{ serviceId: services[7].id, price: 65000, performers: {}, q: { 2: 1 } }], svcMap, empMap);
+    assert.ok(/Bidan/.test(miss.errors.join(' ')));
+    assert.deepStrictEqual(NP.bulk.chunkItems(new Array(120).fill(0)).map((c) => c.length), [50, 50, 20]);
+  });
+  test('analisis: total per kelompok, per tindakan, per pelaksana & pasien sesuai data', () => {
+    const P = NP.pos.plan(parsed.lines, services, emps, { defaults: { bidan: 'KRY-0002', dokter: 'KRY-0001' }, roles });
+    const svcMap = new Map(services.map((s) => [s.id, s]));
+    const empMap = new Map(emps.map((e) => [e.id, e]));
+    const trxs = P.transactions.map((t, i) => ({ id: 'TRX-' + i, date: t.date, patient: t.patient, note: t.note, status: 'active', items: t.items.map((it) => {
+      const s = svcMap.get(it.serviceId);
+      const res = rs.compute(s, { price: it.price, qty: it.qty, performers: it.performers, employees: empMap });
+      const performerNames = {};
+      for (const [role, id] of Object.entries(it.performers)) performerNames[role] = empMap.get(id).name;
+      return { serviceId: s.id, serviceName: s.name, category: s.category, unit: s.unit, qty: it.qty, price: it.price, gross: res.gross, performers: it.performers, performerNames, shares: res.shares };
+    }) }));
+    trxs.push({ id: 'TRX-X', date: '2026-10-05', patient: '', status: 'cancelled', items: trxs[0].items });
+    const A = NP.analysis.build(trxs, { start: '2026-10-01', end: '2026-10-31', group: 'ALL' });
+    assert.deepStrictEqual([A.total.qty, A.total.gross], [52, 6327000]);
+    const g = Object.fromEntries(A.byGroup.map((x) => [x.key, [x.qty, x.gross]]));
+    assert.deepStrictEqual(g, { dokter_bidan: [47, 4817000], homecare: [5, 1510000] });
+    assert.deepStrictEqual([A.byService[0].name, A.byService[0].qty, A.byService[0].gross], ['Suntik Multivitamin', 8, 1760000]);
+    const hc = NP.analysis.build(trxs, { start: '2026-10-01', end: '2026-10-31', group: 'homecare' });
+    assert.deepStrictEqual([hc.total.qty, hc.total.gross, hc.byService.length], [5, 1510000, 4]);
+    const bidan = A.byPerformer.find((p) => p.key === 'KRY-0002');
+    assert.deepStrictEqual([bidan.qty, bidan.fee], [2, 40000]);
+    assert.strictEqual(A.byPatient.length, F.expect.withPatient);
+    const q = NP.analysis.build(trxs, { start: '2026-10-01', end: '2026-10-31', q: 'suntik kb' });
+    assert.strictEqual(q.total.qty, 2);
+    assert.ok(A.trend.daily && A.trend.buckets.length === 31);
+    assert.strictEqual(u.sum(A.trend.series.homecare, (x) => x.qty), 5);
+  });
+}
+
 console.log('\n' + passed + ' lulus, ' + failures.length + ' gagal');
 if (failures.length) process.exit(1);

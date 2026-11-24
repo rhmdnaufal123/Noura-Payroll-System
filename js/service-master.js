@@ -16,7 +16,7 @@
   svc.blank = () => ({
     id: '', code: '', name: '', category: C.SERVICE_CATEGORIES[0], unit: 'APT', price: 0, method: 'nominal',
     shares: [{ type: 'unit', target: 'APT', mode: 'nominal', value: 0 }, { type: 'role', target: 'bidan', mode: 'nominal', value: 0 }],
-    overrides: [], active: true, notes: ''
+    doctorShares: [], overrides: [], active: true, notes: ''
   });
 
   svc.validate = function (s, list) {
@@ -86,8 +86,8 @@
     });
   };
 
-  svc.shareSummary = function (s, employees) {
-    return (s.shares || [])
+  svc.shareSummary = function (s, employees, list) {
+    return (list || s.shares || [])
       .map((x) => {
         const v = x.mode === 'percent' ? u.pct(x.value) : x.mode === 'remainder' ? 'sisa' : u.rp(x.value);
         return '<span class="share-chip share-' + (x.type === 'unit' ? (x.target === 'APT' ? 'apotek' : 'klinik') : x.type === 'role' ? x.target : x.type) + '">' + u.esc(rs.targetLabel(x, employees).replace(' pelaksana', '')) + ' ' + v + '</span>';
@@ -186,9 +186,11 @@
     };
   }
 
-  function previewHtml(service, qty, employees) {
-    const v = rs.validateConfig(service);
-    const r = rs.compute(service, { qty: qty || 1, preview: true, employees: new Map(employees.map((e) => [e.id, e])) });
+  function previewHtml(service, qty, employees, withDoctor) {
+    const all = rs.validateConfig(service);
+    const isDoc = (e) => e.indexOf('Dengan dokter: ') === 0;
+    const r = rs.compute(service, { qty: qty || 1, preview: true, employees: new Map(employees.map((e) => [e.id, e])), withDoctor: !!withDoctor });
+    const v = { errors: all.errors.filter((e) => (withDoctor ? isDoc(e) : !isDoc(e))).map((e) => e.replace('Dengan dokter: ', '')), warnings: withDoctor ? r.warnings : all.warnings };
     const rows = r.shares
       .map((s) => `<tr><td>${u.esc(s.recipientName)}${s.implicit ? ' <small class="muted">(sisa otomatis)</small>' : ''}<small class="block muted">${u.esc(C.SHARE_CATS[s.category] || '')}</small></td><td class="ta-right">${s.mode === 'percent' ? u.pct(s.value) : s.mode === 'remainder' ? 'Sisa' : 'Nominal'}</td><td class="ta-right">${u.rp(s.unitAmount)}</td><td class="ta-right"><b>${u.rp(s.amount)}</b></td></tr>`)
       .join('');
@@ -228,15 +230,34 @@
         <label class="field"><span>Harga jual kepada pasien <b class="req">*</b></span><div class="input-prefix"><span>Rp</span><input name="price" data-money inputmode="numeric" value="${ui.moneyVal(s.price)}"></div></label>
         <label class="field"><span>Metode pembagian</span><select name="method">${ui.options([['nominal', 'A. Nominal tetap'], ['percent', 'B. Persentase'], ['combo', 'C. Kombinasi nominal & persentase']], rs.methodOf(s.shares))}</select></label>
       </div>
+      <div class="field doctor-mode">
+        <span>Pelaksanaan tindakan</span>
+        <div class="seg" role="radiogroup" aria-label="Pelaksanaan tindakan">
+          <button type="button" class="seg-btn ${rs.hasDoctorVariant(s) ? '' : 'active'}" data-dm="single" role="radio" aria-checked="${!rs.hasDoctorVariant(s)}">Satu pembagian</button>
+          <button type="button" class="seg-btn ${rs.hasDoctorVariant(s) ? 'active' : ''}" data-dm="variant" role="radio" aria-checked="${rs.hasDoctorVariant(s)}">Dengan dokter &amp; tanpa dokter (pembagian berbeda)</button>
+        </div>
+        <small class="muted">Pilih "Dengan dokter &amp; tanpa dokter" bila tindakan bisa dikerjakan bidan/perawat sendiri atau bersama dokter, dengan pembagian jasa yang berbeda. Saat input transaksi dipilih salah satunya.</small>
+      </div>
       <div class="grid-split">
         <div>
-          <h4 class="sec-title">Pembagian pendapatan (per 1 tindakan)</h4>
+          <h4 class="sec-title" id="main-title">${rs.hasDoctorVariant(s) ? 'Pembagian TANPA dokter (per 1 tindakan)' : 'Pembagian pendapatan (per 1 tindakan)'}</h4>
           <p class="muted small">Penerima dapat berupa unit usaha, <b>petugas pelaksana</b> (dipilih saat input transaksi), karyawan tertentu, atau penerima lain. Gunakan "Sisa harga" untuk mengalokasikan sisa secara otomatis.</p>
           <div id="share-main"></div>
         </div>
         <div>
           <h4 class="sec-title">Preview pembagian <label class="inline-qty">Simulasi jumlah <input type="number" id="sim-qty" min="1" value="1"></label></h4>
           <div id="share-preview"></div>
+        </div>
+      </div>
+      <div class="grid-split doctor-split" ${rs.hasDoctorVariant(s) ? '' : 'hidden'}>
+        <div>
+          <h4 class="sec-title">Pembagian DENGAN dokter (per 1 tindakan)</h4>
+          <p class="muted small">Dipakai bila saat input transaksi dipilih <b>Dengan dokter</b>. Biasanya memuat bagian untuk <b>Dokter pelaksana</b>.</p>
+          <div id="share-doctor"></div>
+        </div>
+        <div>
+          <h4 class="sec-title">Preview — dengan dokter</h4>
+          <div id="share-preview-doctor"></div>
         </div>
       </div>
       <details class="panel" ${s.overrides.length ? 'open' : ''}>
@@ -253,16 +274,45 @@
     const q = (n) => body.querySelector(`[name="${n}"]`);
     const ovEditors = [];
     let mainEd;
+    let docEd = null;
+    let variant = rs.hasDoctorVariant(s);
     const current = () => {
       const d = ui.formData(body);
-      return Object.assign({}, s, { name: d.name, category: d.category, unit: d.unit, price: d.price, active: d.active === '1', notes: d.notes, shares: mainEd ? mainEd.get() : s.shares, overrides: ovEditors.map((o) => ({ employeeId: o.sel.value, shares: o.ed.get() })) });
+      return Object.assign({}, s, {
+        name: d.name, category: d.category, unit: d.unit, price: d.price, active: d.active === '1', notes: d.notes, shares: mainEd ? mainEd.get() : s.shares,
+        doctorShares: variant && docEd ? docEd.get() : [], overrides: ovEditors.map((o) => ({ employeeId: o.sel.value, shares: o.ed.get() }))
+      });
     };
     const refresh = u.debounce(() => {
-      body.querySelector('#share-preview').innerHTML = previewHtml(current(), u.toNum(body.querySelector('#sim-qty').value) || 1, employees);
+      const cur = current();
+      const qty = u.toNum(body.querySelector('#sim-qty').value) || 1;
+      body.querySelector('#share-preview').innerHTML = previewHtml(cur, qty, employees, false);
+      if (variant) body.querySelector('#share-preview-doctor').innerHTML = previewHtml(cur, qty, employees, true);
     }, 120);
     mainEd = shareEditor(body.querySelector('#share-main'), s.shares, { employees, onChange: refresh });
+    function ensureDocEditor() {
+      if (docEd) return;
+      let init = s.doctorShares && s.doctorShares.length ? s.doctorShares : u.clone(mainEd.get());
+      if (!init.some((x) => x.type === 'role' && x.target === 'dokter')) init = init.concat([{ type: 'role', target: 'dokter', mode: q('method').value === 'percent' ? 'percent' : 'nominal', value: 0 }]);
+      docEd = shareEditor(body.querySelector('#share-doctor'), init, { employees, method: q('method').value, onChange: refresh });
+    }
+    if (variant) ensureDocEditor();
+    body.querySelector('.doctor-mode').addEventListener('click', (e) => {
+      const b = e.target.closest('[data-dm]');
+      if (!b) return;
+      variant = b.dataset.dm === 'variant';
+      body.querySelectorAll('[data-dm]').forEach((x) => {
+        x.classList.toggle('active', x === b);
+        x.setAttribute('aria-checked', String(x === b));
+      });
+      body.querySelector('.doctor-split').hidden = !variant;
+      body.querySelector('#main-title').textContent = variant ? 'Pembagian TANPA dokter (per 1 tindakan)' : 'Pembagian pendapatan (per 1 tindakan)';
+      if (variant) ensureDocEditor();
+      refresh();
+    });
     q('method').onchange = () => {
       mainEd.setMethod(q('method').value);
+      if (docEd) docEd.setMethod(q('method').value);
       ovEditors.forEach((o) => o.ed.setMethod(q('method').value));
     };
     q('price').addEventListener('input', refresh);
@@ -354,7 +404,7 @@
         (!q || (s.code + ' ' + s.name + ' ' + (s.notes || '')).toLowerCase().includes(q)) &&
         (!st.cat || s.category === st.cat) && (!st.unit || s.unit === st.unit) &&
         (!st.status || (st.status === 'active' ? s.active : !s.active)) &&
-        (!st.role || rs.requiredRoles(s).includes(st.role) || (s.shares || []).some((x) => x.type === 'employee' && empMap.get(x.target) && C.roleOfPosition(empMap.get(x.target).position) === st.role))
+        (!st.role || rs.requiredRoles(s).includes(st.role) || rs.requiredRoles(s, true).includes(st.role) || (s.shares || []).some((x) => x.type === 'employee' && empMap.get(x.target) && C.roleOfPosition(empMap.get(x.target).position) === st.role))
       );
     };
     const cols = [
@@ -362,7 +412,7 @@
       { key: 'name', label: 'Nama Tindakan', render: (s) => `<b>${u.esc(s.name)}</b><small class="block muted">${u.esc(s.category)}</small>` },
       { key: 'unit', label: 'Unit', render: (s) => ui.unitBadge(s.unit) },
       { key: 'price', label: 'Harga Jual', align: 'right', render: (s) => `<b>${u.rp(s.price)}</b>`, value: (s) => s.price },
-      { key: 'method', label: 'Pembagian', render: (s) => `<small class="muted">${rs.methodLabel(rs.methodOf(s.shares))}${(s.overrides || []).length ? ' · ' + s.overrides.length + ' khusus' : ''}</small><div class="share-chips">${svc.shareSummary(s, empMap)}</div>`, sortable: false },
+      { key: 'method', label: 'Pembagian', render: (s) => `<small class="muted">${rs.methodLabel(rs.methodOf(s.shares))}${(s.overrides || []).length ? ' · ' + s.overrides.length + ' khusus' : ''}</small>${rs.hasDoctorVariant(s) ? `<div class="variant-line"><small class="variant-tag">Tanpa dokter</small><div class="share-chips">${svc.shareSummary(s, empMap)}</div></div><div class="variant-line"><small class="variant-tag doc">Dengan dokter</small><div class="share-chips">${svc.shareSummary(s, empMap, s.doctorShares)}</div></div>` : `<div class="share-chips">${svc.shareSummary(s, empMap)}</div>`}`, sortable: false },
       { key: 'used', label: 'Dipakai', align: 'right', render: (s) => u.num(usage.get(s.id) || 0) + '×', value: (s) => usage.get(s.id) || 0 },
       { key: 'active', label: 'Status', render: (s) => ui.statusBadge(s.active ? 'active' : 'nonaktif'), value: (s) => (s.active ? 1 : 0) },
       {
@@ -428,6 +478,7 @@
               Kode: s.code, 'Nama Tindakan': s.name, Kategori: s.category, Unit: C.UNITS[s.unit].name, 'Harga Jual': s.price,
               'Metode Pembagian': rs.methodLabel(rs.methodOf(s.shares)),
               Pembagian: (s.shares || []).map((x) => rs.targetLabel(x, empMap) + ': ' + (x.mode === 'percent' ? x.value + '%' : x.mode === 'remainder' ? 'sisa' : x.value)).join('; '),
+              'Pembagian Dengan Dokter': (s.doctorShares || []).map((x) => rs.targetLabel(x, empMap) + ': ' + (x.mode === 'percent' ? x.value + '%' : x.mode === 'remainder' ? 'sisa' : x.value)).join('; '),
               Status: s.active ? 'Aktif' : 'Nonaktif', Keterangan: s.notes || ''
             }))
           }], 'master-tindakan-' + u.todayISO() + '.xlsx');

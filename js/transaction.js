@@ -43,23 +43,27 @@
 
   /** Bangun satu item transaksi dari master tindakan (snapshot). */
   trx.buildItem = function (service, input, empMap) {
-    const r = rs.compute(service, { price: input.price, qty: input.qty, performers: input.performers, employees: empMap });
+    const wd = rs.effectiveWithDoctor(service, input.withDoctor);
+    const r = rs.compute(service, { price: input.price, qty: input.qty, performers: input.performers, employees: empMap, withDoctor: wd });
     if (r.errors.length) {
       const e = new Error(service.name + ': ' + r.errors.join(' '));
       e.errors = r.errors;
       throw e;
     }
     const performers = {};
-    for (const role of rs.requiredRoles(service)) if (input.performers && input.performers[role]) performers[role] = input.performers[role];
+    for (const role of rs.requiredRoles(service, wd)) if (input.performers && input.performers[role]) performers[role] = input.performers[role];
     const performerNames = {};
     for (const [role, id] of Object.entries(performers)) performerNames[role] = (empMap.get(id) || {}).name || id;
     return {
       lineId: input.lineId || u.uid('ln'),
       serviceId: service.id, serviceCode: service.code, serviceName: service.name, category: service.category, unit: service.unit,
-      qty: r.qty, price: r.unitPrice, gross: r.gross, performers, performerNames, overrideFor: r.overrideFor,
+      qty: r.qty, price: r.unitPrice, gross: r.gross, withDoctor: wd, performers, performerNames, overrideFor: r.overrideFor,
       shares: r.shares.map((s) => Object.assign(s, { payroll: { runId: null, state: null } }))
     };
   };
+
+  /** Nama tindakan beserta varian (untuk tampilan & ekspor). */
+  trx.itemLabel = (i) => i.serviceName + (i.withDoctor ? ' (dengan dokter)' : '');
 
   trx.totals = function (items) {
     const t = rs.summarize([].concat(...items.map((i) => i.shares)));
@@ -136,7 +140,7 @@
     const items = draft.items.map((inp, idx) => {
       // Untuk edit: item lama yang tidak diubah (tindakan, harga, jumlah, petugas sama) tetap memakai snapshot lama.
       const prev = old && old.items.find((x) => x.lineId === inp.lineId);
-      if (prev && prev.serviceId === inp.serviceId && prev.qty === u.toInt(inp.qty) && prev.price === u.toInt(inp.price) && JSON.stringify(prev.performers) === JSON.stringify(cleanPerf(inp.performers, prev))) {
+      if (prev && prev.serviceId === inp.serviceId && prev.qty === u.toInt(inp.qty) && prev.price === u.toInt(inp.price) && !!prev.withDoctor === !!inp.withDoctor && JSON.stringify(prev.performers) === JSON.stringify(cleanPerf(inp.performers, prev))) {
         return u.clone(prev);
       }
       const svc = services.get(inp.serviceId);
@@ -164,9 +168,10 @@
         const n = await t.nextNumber('trx-' + ym);
         rec = {
           id: NP.state.settings.numbering.transaction + '-' + ym + '-' + String(n).padStart(4, '0'),
-          date: draft.date, patient: draft.patient || '', patientCode: draft.patientCode || '', note: draft.note || '',
+          date: draft.date, patient: draft.patient || '', patientCode: draft.patientCode || '', note: draft.note || '', externalRef: draft.externalRef || null,
           items, status: 'active', adjustments: [], createdAt: Date.now(), createdBy: usr ? usr.username : 'sistem'
         };
+        if (rec.externalRef && (await t.all('transactions')).some((x) => x.externalRef === rec.externalRef && x.status === 'active')) throw new Error('Data ' + rec.externalRef + ' sudah pernah disimpan.');
         rec.totals = trx.totals(items);
         await t.put('transactions', rec);
         await t.put('auditLog', NP.audit.entry('trx.create', 'transaction', rec.id, 'Transaksi baru ' + items.length + ' tindakan, total ' + u.rp(rec.totals.gross)));
@@ -202,6 +207,56 @@
         (chk.locked ? 'KOREKSI TERKUNCI (otorisasi ' + opt.auth.by + '): ' + opt.auth.note + ' | ' : 'Ubah transaksi | ') + 'Sebelum: ' + before.items + ' = ' + u.rp(before.total) + ' (' + before.date + ') → Sesudah: ' + after.items + ' = ' + u.rp(after.total) + ' (' + after.date + ')'));
       return rec;
     });
+  };
+
+  /**
+   * Simpan banyak transaksi sekaligus (input bulanan / impor POS).
+   * Supabase: satu transaksi database (semua tersimpan atau tidak sama sekali).
+   * Transaksi ber-externalRef yang sudah ada dilewati agar impor ulang tidak menggandakan data.
+   * @returns {{created:string[], skipped:string[], gross:number}}
+   */
+  trx.bulkSave = async function (list, source, onProgress) {
+    if (!list || !list.length) throw new Error('Tidak ada transaksi untuk disimpan.');
+    for (const d of list) {
+      if (!d.date) throw new Error('Tanggal transaksi wajib diisi.');
+      if (d.date > u.todayISO()) throw new Error('Tanggal ' + u.fmtDate(d.date) + ' melebihi hari ini.');
+      if (!d.items || !d.items.length) throw new Error('Transaksi ' + (d.externalRef || u.fmtDate(d.date)) + ' tidak memiliki tindakan.');
+    }
+    if (NP.db.remote) {
+      const out = [];
+      const res = { created: [], skipped: [], gross: 0 };
+      // dipecah per 200 transaksi agar permintaan tidak terlalu besar
+      for (let i = 0; i < list.length; i += 200) out.push(list.slice(i, i + 200));
+      for (const [n, chunk] of out.entries()) {
+        onProgress && onProgress(n * 200, list.length);
+        const r = await NP.db.bulkSaveTransactions(chunk, source);
+        res.created.push(...(r.created || []));
+        res.skipped.push(...(r.skipped || []));
+        res.gross += Number(r.gross) || 0;
+      }
+      return res;
+    }
+    const existing = new Set((await NP.db.all('transactions')).filter((t) => t.status === 'active' && t.externalRef).map((t) => t.externalRef));
+    const res = { created: [], skipped: [], gross: 0 };
+    for (const [i, d] of list.entries()) {
+      onProgress && onProgress(i, list.length);
+      if (d.externalRef && existing.has(d.externalRef)) {
+        res.skipped.push(d.externalRef);
+        continue;
+      }
+      try {
+        const rec = await trx.save(d);
+        res.created.push(rec.id);
+        res.gross += rec.totals.gross;
+        if (d.externalRef) existing.add(d.externalRef);
+      } catch (e) {
+        e.message = 'Data ke-' + (i + 1) + ' (' + (d.externalRef || u.fmtDate(d.date)) + '): ' + e.message + (res.created.length ? ' — ' + res.created.length + ' transaksi sebelumnya sudah tersimpan.' : '');
+        e.partial = res;
+        throw e;
+      }
+    }
+    if (res.created.length) await NP.audit.log('trx.bulk', 'transaction', res.created[0], 'Input massal (' + (source || 'input bulanan') + '): ' + res.created.length + ' transaksi tersimpan, ' + res.skipped.length + ' dilewati, total ' + u.rp(res.gross));
+    return res;
   };
 
   /** Batalkan transaksi. Transaksi terkunci memerlukan otorisasi (opt.auth) dan menghasilkan adjustment negatif. */
@@ -272,11 +327,11 @@
       <tr><td>Pasien</td><td>: ${u.esc(t.patient || '-')}${t.patientCode ? ' (' + u.esc(t.patientCode) + ')' : ''}</td></tr>
       <tr><td>Status</td><td>: ${t.status === 'cancelled' ? 'DIBATALKAN — ' + u.esc(t.cancelReason || '') : 'Aktif'}</td></tr></table>
       <table class="rc-items"><thead><tr><th>Tindakan</th><th>Petugas</th><th class="r">Jml</th><th class="r">Harga</th><th class="r">Subtotal</th></tr></thead><tbody>
-      ${t.items.map((i) => `<tr><td>${u.esc(i.serviceName)}<small>${u.esc(i.serviceCode)}</small></td><td>${u.esc(Object.values(i.performerNames || {}).join(', ') || '-')}</td><td class="r">${i.qty}</td><td class="r">${u.rp(i.price)}</td><td class="r">${u.rp(i.gross)}</td></tr>`).join('')}
+      ${t.items.map((i) => `<tr><td>${u.esc(trx.itemLabel(i))}<small>${u.esc(i.serviceCode)}</small></td><td>${u.esc(Object.values(i.performerNames || {}).join(', ') || '-')}</td><td class="r">${i.qty}</td><td class="r">${u.rp(i.price)}</td><td class="r">${u.rp(i.gross)}</td></tr>`).join('')}
       </tbody><tfoot><tr><th colspan="4">TOTAL</th><th class="r">${u.rp(tot.gross)}</th></tr></tfoot></table>
       <h4>Rincian pembagian pendapatan (internal)</h4>
       <table class="rc-items"><tbody>
-      ${t.items.map((i) => i.shares.map((s) => `<tr><td>${u.esc(i.serviceName)}</td><td>${u.esc(s.recipientName)}</td><td class="r">${u.rp(s.unitAmount)} × ${i.qty}</td><td class="r">${u.rp(s.amount)}</td></tr>`).join('')).join('')}
+      ${t.items.map((i) => i.shares.map((s) => `<tr><td>${u.esc(trx.itemLabel(i))}</td><td>${u.esc(s.recipientName)}</td><td class="r">${u.rp(s.unitAmount)} × ${i.qty}</td><td class="r">${u.rp(s.amount)}</td></tr>`).join('')).join('')}
       </tbody></table>
       <div class="rc-sum"><span>Bagian Apotek Noura: <b>${u.rp(tot.apotek)}</b></span>${tot.klinik ? `<span>Bagian Praktek Dokter: <b>${u.rp(tot.klinik)}</b></span>` : ''}<span>Jasa tenaga kesehatan/petugas: <b>${u.rp(tot.staff)}</b></span>${tot.eksternal ? `<span>Penerima lain: <b>${u.rp(tot.eksternal)}</b></span>` : ''}</div>
       <div class="rc-foot"><span>Dicatat oleh: ${u.esc(t.createdBy)} · ${u.fmtDateTime(t.createdAt)}</span><span>Dicetak: ${u.fmtDateTime(Date.now())}</span></div>
@@ -319,7 +374,7 @@
     } catch (_) {}
 
     const rows = editing
-      ? editing.items.map((i) => ({ lineId: i.lineId, serviceId: i.serviceId, qty: i.qty, price: i.price, performers: Object.assign({}, i.performers) }))
+      ? editing.items.map((i) => ({ lineId: i.lineId, serviceId: i.serviceId, qty: i.qty, price: i.price, withDoctor: !!i.withDoctor, performers: Object.assign({}, i.performers) }))
       : [{ lineId: u.uid('ln'), serviceId: '', qty: 1, price: 0, performers: {} }];
 
     view.innerHTML = `
@@ -331,10 +386,10 @@
       ${editState && editState.draftRuns.length ? `<div class="alert alert-info">${ui.icon('info')}<div>Transaksi ini termasuk dalam draft penggajian ${editState.draftRuns.join(', ')}. Setelah diubah, draft tersebut perlu dihitung ulang.</div></div>` : ''}
       <div class="input-layout">
         <form class="card input-form" novalidate>
-          <div class="grid-3">
-            <label class="field"><span>Tanggal transaksi <b class="req">*</b></span><input type="date" name="date" max="${u.todayISO()}" value="${editing ? editing.date : u.todayISO()}"></label>
-            <label class="field"><span>Nama pasien (opsional)</span><input name="patient" value="${u.esc(editing ? editing.patient : '')}" maxlength="80"></label>
-            <label class="field"><span>Kode pasien / No. RM (opsional)</span><input name="patientCode" value="${u.esc(editing ? editing.patientCode : '')}" maxlength="30"></label>
+          <div class="grid-3 trx-head">
+            <label class="field f-date"><span>Tanggal transaksi <b class="req">*</b></span><input type="date" name="date" max="${u.todayISO()}" value="${editing ? editing.date : u.todayISO()}"></label>
+            <label class="field f-name"><span>Nama pasien (opsional)</span><input name="patient" value="${u.esc(editing ? editing.patient : '')}" maxlength="80"></label>
+            <label class="field f-rm"><span>No. RM / kode pasien (opsional)</span><input name="patientCode" value="${u.esc(editing ? editing.patientCode : '')}" maxlength="30"></label>
           </div>
           <h4 class="sec-title">Daftar tindakan</h4>
           <div id="item-rows"></div>
@@ -367,14 +422,18 @@
     function computeRow(r) {
       const s = svcMap.get(r.serviceId);
       if (!s) return null;
-      return rs.compute(s, { price: r.price, qty: r.qty, performers: r.performers, employees: empMap });
+      return rs.compute(s, { price: r.price, qty: r.qty, performers: r.performers, employees: empMap, withDoctor: r.withDoctor });
+    }
+    function fillPerformers(r, s) {
+      for (const role of rs.requiredRoles(s, r.withDoctor)) if (!r.performers[role] && lastPerf[role] && staffFor(role).some((x) => x.id === lastPerf[role])) r.performers[role] = lastPerf[role];
     }
 
     function drawRows() {
       rowsEl.innerHTML = rows
         .map((r, i) => {
           const s = svcMap.get(r.serviceId);
-          const roles = s ? rs.requiredRoles(s) : [];
+          const roles = s ? rs.requiredRoles(s, r.withDoctor) : [];
+          const variant = s && rs.hasDoctorVariant(s);
           const res = computeRow(r);
           return `<div class="item-row" data-i="${i}">
             <div class="item-main">
@@ -383,6 +442,7 @@
               <label class="field item-price"><span>Harga jual</span><div class="input-prefix"><span>Rp</span><input data-f="price" data-money inputmode="numeric" value="${ui.moneyVal(r.price)}"></div></label>
               ${rows.length > 1 ? `<button type="button" class="icon-btn danger item-del" data-del="${i}" title="Hapus baris">${ui.icon('trash')}</button>` : ''}
             </div>
+            ${variant ? `<div class="item-variant"><span>Pelaksanaan</span><div class="seg" role="group" aria-label="Dengan atau tanpa dokter"><button type="button" class="seg-btn ${r.withDoctor ? '' : 'active'}" data-wd="0" aria-pressed="${!r.withDoctor}">Tanpa dokter</button><button type="button" class="seg-btn ${r.withDoctor ? 'active' : ''}" data-wd="1" aria-pressed="${!!r.withDoctor}">Dengan dokter</button></div></div>` : ''}
             ${roles.length ? `<div class="item-perf">${roles.map((role) => `<label class="field"><span>${C.ROLES[role].label} pelaksana <b class="req">*</b></span><select data-perf="${role}">${ui.options(staffFor(role).map((e) => [e.id, e.name + (e.status === 'cuti' ? ' (cuti)' : '')]), r.performers[role], '— pilih ' + C.ROLES[role].label.toLowerCase() + ' —')}</select></label>`).join('')}</div>` : ''}
             ${res ? `<div class="item-preview">${res.errors.length ? `<span class="text-danger small">${res.errors.map(u.esc).join(' ')}</span>` : res.shares.map((x) => `<span class="share-chip share-${x.category}">${u.esc(x.recipientName)}: <b>${u.rp(x.amount)}</b></span>`).join('')}${res.overrideFor ? ' <small class="muted">(pembagian khusus petugas)</small>' : ''}${res.warnings.length ? `<small class="block text-warning">${res.warnings.map(u.esc).join(' ')}</small>` : ''}</div>` : ''}
           </div>`;
@@ -423,7 +483,8 @@
         const s = svcMap.get(r.serviceId);
         r.price = s ? s.price : 0;
         r.performers = {};
-        if (s) for (const role of rs.requiredRoles(s)) if (lastPerf[role] && staffFor(role).some((x) => x.id === lastPerf[role])) r.performers[role] = lastPerf[role];
+        r.withDoctor = false;
+        if (s) fillPerformers(r, s);
         drawRows();
       } else if (e.target.dataset.perf) {
         r.performers[e.target.dataset.perf] = e.target.value;
@@ -448,6 +509,14 @@
       drawSummary();
     }, 150));
     rowsEl.addEventListener('click', (e) => {
+      const wdBtn = e.target.closest('[data-wd]');
+      if (wdBtn) {
+        const r = rows[+wdBtn.closest('.item-row').dataset.i];
+        r.withDoctor = wdBtn.dataset.wd === '1';
+        fillPerformers(r, svcMap.get(r.serviceId));
+        drawRows();
+        return;
+      }
       const st = e.target.closest('[data-step]');
       if (st) {
         const r = rows[+st.closest('.item-row').dataset.i];
@@ -466,7 +535,7 @@
       if (rows.some((r) => !r.serviceId)) return ui.toast('Pilih tindakan pada setiap baris atau hapus baris kosong.', 'error');
       const bad = rows.map(computeRow).find((r) => r && r.errors.length);
       if (bad) return ui.toast(bad.errors.join(' '), 'error');
-      const draft = { date: d.date, patient: d.patient, patientCode: d.patientCode, note: d.note, items: rows.map((r) => ({ lineId: r.lineId, serviceId: r.serviceId, qty: u.toInt(r.qty), price: u.toInt(r.price), performers: r.performers })) };
+      const draft = { date: d.date, patient: d.patient, patientCode: d.patientCode, note: d.note, items: rows.map((r) => ({ lineId: r.lineId, serviceId: r.serviceId, qty: u.toInt(r.qty), price: u.toInt(r.price), withDoctor: rs.effectiveWithDoctor(svcMap.get(r.serviceId), r.withDoctor), performers: Object.fromEntries(rs.requiredRoles(svcMap.get(r.serviceId), r.withDoctor).filter((k) => r.performers[k]).map((k) => [k, r.performers[k]])) })) };
       let auth = null;
       if (editState && editState.locked) {
         auth = await NP.sec.authorize('Koreksi transaksi ' + editing.id + ' yang sudah masuk periode gaji terkunci.');
@@ -518,7 +587,7 @@
       ui.table(el, {
         columns: [
           { key: 'id', label: 'No. Transaksi' },
-          { key: 'items', label: 'Tindakan', render: (t) => t.items.map((i) => u.esc(i.serviceName) + ' ×' + i.qty).join('<br>'), sortable: false },
+          { key: 'items', label: 'Tindakan', render: (t) => t.items.map((i) => u.esc(trx.itemLabel(i)) + ' ×' + i.qty).join('<br>'), sortable: false },
           { key: 'perf', label: 'Petugas', render: (t) => u.esc([...new Set([].concat(...t.items.map((i) => Object.values(i.performerNames || {}))))].join(', ') || '-'), sortable: false },
           { key: 'gross', label: 'Total', align: 'right', render: (t) => u.rp(t.totals.gross), value: (t) => t.totals.gross },
           { key: 'status', label: 'Status', render: (t) => ui.statusBadge(t.status) },
@@ -599,7 +668,7 @@
     const cols = [
       { key: 'id', label: 'No. Transaksi', render: (r) => `<b>${u.esc(r.t.id)}</b>${r.t.items.length > 1 ? `<small class="block muted">item ${r.idx + 1}/${r.t.items.length}</small>` : ''}`, value: (r) => r.key },
       { key: 'date', label: 'Tanggal', render: (r) => u.fmtDate(r.t.date), value: (r) => r.t.date },
-      { key: 'svc', label: 'Tindakan', render: (r) => `${u.esc(r.it.serviceName)}<small class="block muted">${u.esc(r.it.serviceCode)}</small>`, value: (r) => r.it.serviceName },
+      { key: 'svc', label: 'Tindakan', render: (r) => `${u.esc(trx.itemLabel(r.it))}<small class="block muted">${u.esc(r.it.serviceCode)}</small>`, value: (r) => r.it.serviceName },
       { key: 'patient', label: 'Pasien', render: (r) => u.esc(r.t.patient || r.t.patientCode || '-'), value: (r) => r.t.patient },
       { key: 'perf', label: 'Petugas', render: (r) => u.esc(Object.values(r.it.performerNames || {}).join(', ') || '-'), value: (r) => Object.values(r.it.performerNames || {}).join() },
       { key: 'qty', label: 'Jml', align: 'right', render: (r) => r.it.qty, value: (r) => r.it.qty },
@@ -685,7 +754,7 @@
           NP.exp.excel([{
             name: 'Riwayat Transaksi',
             rows: rows.map((r) => ({
-              'No. Transaksi': r.t.id, Tanggal: r.t.date, Tindakan: r.it.serviceName, Kategori: r.it.category, Unit: C.UNITS[r.it.unit].name,
+              'No. Transaksi': r.t.id, Tanggal: r.t.date, Tindakan: trx.itemLabel(r.it), Kategori: r.it.category, Unit: C.UNITS[r.it.unit].name,
               Pasien: r.t.patient, 'Kode Pasien': r.t.patientCode, Petugas: Object.values(r.it.performerNames || {}).join(', '), Jumlah: r.it.qty,
               'Harga Jual': r.it.price, 'Total Pendapatan': r.it.gross, 'Bagian Apotek Noura': r.sm.apotek, 'Bagian Praktek Dokter': r.sm.klinik,
               'Jasa Dokter': r.sm.dokter, 'Jasa Bidan': r.sm.bidan, 'Jasa Perawat': r.sm.perawat, 'Jasa Lainnya': r.sm.farmasi + r.sm.petugas, 'Penerima Lain': r.sm.eksternal,
@@ -703,7 +772,7 @@
             unit: 'APT',
             orientation: 'landscape',
             head: ['No. Transaksi', 'Tanggal', 'Tindakan', 'Pasien', 'Petugas', 'Jml', 'Harga', 'Total', 'Bag. Apotek', 'Bag. Nakes', 'Status', 'Status Gaji'],
-            body: rows.map((r) => [r.t.id, u.fmtDate(r.t.date, 'short'), r.it.serviceName, r.t.patient || '-', Object.values(r.it.performerNames || {}).join(', '), r.it.qty, u.rp(r.it.price), u.rp(r.it.gross), u.rp(r.sm.business), u.rp(r.sm.staff + r.sm.eksternal), r.t.status === 'active' ? 'Aktif' : 'Batal', { none: '-', open: 'Belum', inrun: 'Proses', paid: 'Terkunci', partial: 'Sebagian' }[r.ps]]),
+            body: rows.map((r) => [r.t.id, u.fmtDate(r.t.date, 'short'), trx.itemLabel(r.it), r.t.patient || '-', Object.values(r.it.performerNames || {}).join(', '), r.it.qty, u.rp(r.it.price), u.rp(r.it.gross), u.rp(r.sm.business), u.rp(r.sm.staff + r.sm.eksternal), r.t.status === 'active' ? 'Aktif' : 'Batal', { none: '-', open: 'Belum', inrun: 'Proses', paid: 'Terkunci', partial: 'Sebagian' }[r.ps]]),
             foot: [['TOTAL (aktif)', '', '', '', '', u.num(u.sum(act, (r) => r.it.qty)), '', u.rp(u.sum(act, (r) => r.it.gross)), u.rp(u.sum(act, (r) => r.sm.business)), u.rp(u.sum(act, (r) => r.sm.staff + r.sm.eksternal)), '', '']],
             numericCols: [5, 6, 7, 8, 9],
             filename: 'riwayat-transaksi-' + hs.start + '_' + hs.end + '.pdf'
@@ -727,7 +796,7 @@
           <div class="kv"><span>Status</span><b>${ui.statusBadge(t.status)} ${ui.statusBadge(trx.payrollStatus(t))}</b></div>
         </div>
         ${t.status === 'cancelled' ? `<div class="alert alert-danger">${ui.icon('x')}<div>Dibatalkan oleh ${u.esc(t.cancelledBy)} pada ${u.fmtDateTime(t.cancelledAt)}: ${u.esc(t.cancelReason)}</div></div>` : ''}
-        ${t.items.map((it) => `<div class="panel"><div class="panel-head"><b>${u.esc(it.serviceName)}</b> <small class="muted">${u.esc(it.serviceCode)} · ${u.esc(it.category)}</small><span class="right">${it.qty} × ${u.rp(it.price)} = <b>${u.rp(it.gross)}</b></span></div>
+        ${t.items.map((it) => `<div class="panel"><div class="panel-head"><b>${u.esc(trx.itemLabel(it))}</b> <small class="muted">${u.esc(it.serviceCode)} · ${u.esc(it.category)}</small><span class="right">${it.qty} × ${u.rp(it.price)} = <b>${u.rp(it.gross)}</b></span></div>
           <div class="table-wrap"><table class="tbl tbl-compact"><thead><tr><th>Penerima</th><th>Kategori</th><th class="ta-right">Per tindakan</th><th class="ta-right">Jumlah</th><th>Status penggajian</th></tr></thead><tbody>
           ${it.shares.map((s) => `<tr><td>${u.esc(s.recipientName)}${s.implicit ? ' <small class="muted">(sisa)</small>' : ''}</td><td>${u.esc(C.SHARE_CATS[s.category] || '')}</td><td class="ta-right">${u.rp(s.unitAmount)}</td><td class="ta-right">${u.rp(s.amount)}</td><td>${s.recipientId && (s.type === 'role' || s.type === 'employee') ? payLabel(s.payroll) : '<small class="muted">Bagian usaha/eksternal</small>'}</td></tr>`).join('')}
           </tbody></table></div></div>`).join('')}

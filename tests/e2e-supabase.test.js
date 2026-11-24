@@ -75,13 +75,13 @@ async function step(name, fn) {
     await p.evaluate(() => localStorage.clear());
   };
   const modalBtn = (p, label) => p.locator('.modal-backdrop').last().locator('.modal-foot button', { hasText: label });
-  const toastAfter = async (p, fn, re) => {
-    const n = await p.locator('.toast').count();
+  // Toast lama ditandai lebih dulu; yang ditunggu adalah toast BARU yang cocok (toast lama bisa hilang sendiri).
+  const toastAfter = async (p, fn, re, timeout) => {
+    await p.evaluate(() => document.querySelectorAll('.toast').forEach((t) => (t.dataset.seen = '1')));
     await fn();
-    await p.waitForFunction(([n0, src]) => {
-      const t = [...document.querySelectorAll('.toast')];
-      return t.length > n0 && new RegExp(src).test(t[t.length - 1].textContent);
-    }, [n, re.source], { timeout: 20000 });
+    await p.waitForFunction((src) => [...document.querySelectorAll('.toast:not([data-seen])')].some((t) => new RegExp(src).test(t.textContent)), re.source, { timeout: timeout || 20000 }).catch(async (e) => {
+      throw new Error('Toast /' + re.source + '/ tidak muncul. Toast: ' + (await p.locator('.toast').allInnerTexts().catch(() => [])).join(' | '));
+    });
   };
 
   console.log('Login Supabase Auth');
@@ -268,6 +268,82 @@ async function step(name, fn) {
     const u = await sql("select role, active from public.users where email = 'staf.baru@noura.test'");
     assert.deepStrictEqual(u, [{ role: 'ops', active: true }]);
   });
+  console.log('Impor POS & analisis tindakan (database pusat)');
+  const prevMonth = (() => {
+    const d = new Date();
+    d.setDate(1);
+    d.setMonth(d.getMonth() - 1);
+    return d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0');
+  })();
+  const fx = require('./support/pos-fixture.js');
+  const FX = fx.build({ year: +prevMonth.slice(0, 4), month: +prevMonth.slice(5) });
+  const posFile = fx.writeXlsx(require(path.join(ROOT, 'vendor', 'xlsx.full.min.js')), path.join(require('os').tmpdir(), 'penjualan-pos-supabase.xlsx'), { year: +prevMonth.slice(0, 4), month: +prevMonth.slice(5) });
+  const pickPos = async () => {
+    await go(A, 'bulk?tab=pos');
+    const [fc] = await Promise.all([A.waitForEvent('filechooser'), A.click('[data-act=pick]')]);
+    await fc.setFiles(posFile);
+    await A.waitForSelector('.pos-cats');
+  };
+  await step('admin mengimpor file POS → satu transaksi database, 52 tindakan Rp6.327.000 di server', async () => {
+    await pickPos();
+    await toastAfter(A, () => A.click('[data-act=create-master]'), /ditambahkan ke Master Tindakan/, 90000);
+    await A.waitForSelector('[data-act=create-master]', { state: 'detached' });
+    const def = A.locator('select[data-def=bidan]');
+    if (await def.count()) {
+      await def.selectOption(ID.bidan);
+      await A.waitForTimeout(400);
+    }
+    assert.ok(await A.locator('[data-act=import]').isEnabled(), await A.locator('#pos-body').innerText());
+    await A.click('[data-act=import]');
+    const t0 = Date.now();
+    await toastAfter(A, () => modalBtn(A, 'Impor sekarang').click(), /transaksi diimpor/, 90000);
+    console.log('    (impor ' + FX.expect.transactions + ' transaksi: ' + (Date.now() - t0) + ' ms)');
+    const r = await sql("select count(distinct t.id)::int n, sum(i.qty)::int qty, sum(i.gross)::bigint::text gross, sum(i.qty) filter (where i.category = 'Homecare')::int hc from public.service_transactions t join public.service_transaction_items i on i.transaction_id = t.id where t.external_ref like 'POS:%'");
+    assert.deepStrictEqual(r[0], { n: FX.expect.transactions, qty: 52, gross: '6327000', hc: 5 });
+    const a = await sql("select count(*)::int n from public.audit_logs where action = 'trx.bulk'");
+    assert.strictEqual(a[0].n, 1);
+  });
+  await step('impor ulang file yang sama tidak menggandakan data', async () => {
+    await pickPos();
+    assert.ok(await A.locator('[data-act=import]').isDisabled());
+    assert.ok(/sudah pernah diimpor/.test(await A.locator('#pos-body').innerText()));
+    const n = await A.evaluate(() => NP.db.bulkSaveTransactions([{ date: '2025-01-02', externalRef: 'POS:' + document.querySelector('#pos-table tbody td:nth-child(2)').textContent.trim().split(/\s/)[0], items: [] }], 'uji').then((r) => r.skipped.length, (e) => 'ERR ' + e.message));
+    assert.strictEqual(n, 1, 'server melewati struk yang sudah ada');
+    const c = await sql("select count(*)::int n from public.service_transactions where external_ref like 'POS:%'");
+    assert.strictEqual(c[0].n, FX.expect.transactions);
+  });
+  await step('analisis tindakan dari data server: Homecare 5 tindakan Rp1.510.000', async () => {
+    await go(A, 'analysis?month=' + prevMonth);
+    await A.waitForFunction(() => /1\.510\.000/.test(document.querySelector('.an-group[data-group=homecare]').textContent));
+    await A.click('.an-group[data-group=homecare]');
+    await A.waitForFunction(() => document.querySelectorAll('#an-svc tbody tr').length === 4);
+  });
+
+  await step('tindakan dengan & tanpa dokter: master tersimpan per varian, transaksi memakai pembagian yang dipilih', async () => {
+    const ids = await A.evaluate(async (bidan) => {
+      const dr = await NP.emp.save(Object.assign(NP.emp.blank(), { name: 'dr. Pusat Satu', phone: '081299990003', unit: 'KLINIK', position: 'Dokter Umum', department: 'Pelayanan Medis', payScheme: 'service_only', baseSalary: 0 }));
+      const s = await NP.svc.save({
+        id: '', code: '', name: 'Injeksi Pusat', category: 'Dokter Umum & Bidan', unit: 'KLINIK', price: 150000, active: true, notes: '', overrides: [],
+        shares: [{ type: 'unit', target: 'KLINIK', mode: 'remainder', value: 0 }, { type: 'role', target: 'bidan', mode: 'nominal', value: 30000 }],
+        doctorShares: [{ type: 'unit', target: 'KLINIK', mode: 'remainder', value: 0 }, { type: 'role', target: 'dokter', mode: 'nominal', value: 50000 }, { type: 'role', target: 'bidan', mode: 'nominal', value: 10000 }]
+      });
+      const back = await NP.db.get('services', s.id);
+      return { dr: dr.id, sv: s.id, back: { shares: back.shares.length, doctorShares: back.doctorShares.map((x) => x.target) }, bidan };
+    }, ID.bidan);
+    assert.deepStrictEqual(ids.back, { shares: 2, doctorShares: ['KLINIK', 'dokter', 'bidan'] });
+    await go(A, 'input');
+    await A.selectOption('.item-row [data-f=serviceId]', ids.sv);
+    await A.click('.item-variant [data-wd="1"]');
+    await A.selectOption('.item-row [data-perf=dokter]', ids.dr);
+    await A.selectOption('.item-row [data-perf=bidan]', ID.bidan);
+    await A.fill('.input-form [name=patient]', 'Pasien Varian Dokter');
+    await toastAfter(A, () => A.click('[data-act=save]'), /tersimpan/);
+    const r = await sql("select i.with_doctor, a.category, a.amount::int from public.service_transaction_items i join public.service_transactions t on t.id = i.transaction_id join public.service_transaction_allocations a on a.item_id = i.id where t.patient_name = 'Pasien Varian Dokter' order by a.sort_order");
+    assert.deepStrictEqual(r, [{ with_doctor: true, category: 'klinik', amount: 90000 }, { with_doctor: true, category: 'dokter', amount: 50000 }, { with_doctor: true, category: 'bidan', amount: 10000 }]);
+    const t = await A.evaluate(async () => (await NP.trx.all()).find((x) => x.patient === 'Pasien Varian Dokter').items[0].withDoctor);
+    assert.strictEqual(t, true);
+  });
+
   await step('viewer hanya melihat laporan; tidak dapat membaca slip/penggajian rinci', async () => {
     await logout(B);
     await login(B, 'viewer@noura.test', 'Viewer#2026');

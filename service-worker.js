@@ -1,11 +1,11 @@
 /* Noura Payroll — service worker: cache aset aplikasi agar dapat dibuka offline (PWA).
  * Data tetap di IndexedDB; service worker hanya menyimpan file aplikasi. */
-const CACHE = 'noura-payroll-v2.0.0';
+const CACHE = 'noura-payroll-v2.1.0';
 const ASSETS = [
   './', './index.html', './manifest.json',
   './css/style.css', './css/dashboard.css', './css/employee.css', './css/transaction.css', './css/payroll.css', './css/report.css', './css/print.css',
   './js/utils.js', './js/constants.js', './js/defaults.js', './js/env.js', './js/database.js', './js/supabase-driver.js', './js/security.js', './js/ui.js', './js/revenue-sharing.js',
-  './js/calculator.js', './js/export.js', './js/employee.js', './js/service-master.js', './js/transaction.js', './js/service-income.js',
+  './js/calculator.js', './js/export.js', './js/employee.js', './js/service-master.js', './js/transaction.js', './js/pos-import.js', './js/bulk-input.js', './js/analysis.js', './js/service-income.js',
   './js/payroll.js', './js/payslip.js', './js/reports.js', './js/dashboard.js', './js/settings.js', './js/demo-data.js', './js/app.js',
   './vendor/chart.umd.min.js', './vendor/xlsx.full.min.js', './vendor/jspdf.umd.min.js', './vendor/jspdf.plugin.autotable.min.js',
   './vendor/html2canvas.min.js', './vendor/jszip.min.js', './vendor/supabase.min.js',
