@@ -5,7 +5,7 @@ Aplikasi web untuk **penggajian otomatis, pembagian jasa pelayanan (revenue shar
 Semua fitur berjalan sungguhan di browser: data disimpan di **IndexedDB**, perhitungan uang memakai bilangan bulat rupiah, dan setiap perubahan penting tercatat di audit log.
 
 > **Dua mode penyimpanan.**
-> - **Mode Supabase (produksi, multi-perangkat):** bila `js/env.js` berisi `SUPABASE_URL` dan `SUPABASE_ANON_KEY`, seluruh data disimpan di PostgreSQL Supabase dengan login Supabase Auth, Row Level Security, dan fungsi server atomik. Tidak ada cadangan ke penyimpanan lokal. **Panduan lengkap: [docs/SUPABASE.md](docs/SUPABASE.md).**
+> - **Mode Supabase (produksi, multi-perangkat):** bila `js/env.js` berisi `SUPABASE_URL` dan publishable key, seluruh data disimpan di PostgreSQL Supabase dengan login Supabase Auth, Row Level Security, dan fungsi server atomik. Tidak ada cadangan ke penyimpanan lokal. **Panduan lengkap: [docs/SUPABASE.md](docs/SUPABASE.md).**
 > - **Mode lokal (demo/satu perangkat):** bila `js/env.js` kosong, data disimpan di IndexedDB browser dengan data demonstrasi. Cocok untuk mencoba aplikasi.
 
 ---

@@ -23,4 +23,4 @@ jobs:
       - run: supabase link --project-ref "${{ vars.SUPABASE_PROJECT_REF }}" --password "$SUPABASE_DB_PASSWORD"
       - run: supabase db push --include-seed --password "$SUPABASE_DB_PASSWORD"
       - if: ${{ inputs.deploy_function }}
-        run: supabase functions deploy admin-users --project-ref "${{ vars.SUPABASE_PROJECT_REF }}"
+        run: supabase functions deploy admin-users --no-verify-jwt --project-ref "${{ vars.SUPABASE_PROJECT_REF }}"

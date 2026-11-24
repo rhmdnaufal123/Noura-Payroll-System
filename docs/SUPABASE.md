@@ -70,7 +70,7 @@ Semua uang disimpan sebagai `BIGINT` rupiah. Constraint penting: total pembagian
 ## Langkah pemasangan
 
 ### 1. Buat proyek Supabase
-Buat proyek di <https://supabase.com>. Catat **Project URL**, **anon/publishable key**, **project ref**, dan **password database**.
+Buat proyek di <https://supabase.com>. Catat **Project URL**, **publishable key** (`sb_publishable_…`), **project ref**, dan **password database**. **Secret key** (`sb_secret_…`) tidak dipakai aplikasi web dan tidak boleh disalin ke file aplikasi.
 
 Di **Authentication › Sign In / Providers**: matikan *Allow new users to sign up* (akun dibuat administrator).
 
@@ -84,20 +84,23 @@ Pilih salah satu:
   supabase functions deploy admin-users
   ```
 - **GitHub Actions**: isi secrets `SUPABASE_ACCESS_TOKEN`, `SUPABASE_DB_PASSWORD` dan variable `SUPABASE_PROJECT_REF`, lalu jalankan workflow **Migrasi Supabase**.
-- **SQL Editor**: jalankan berurutan isi `supabase/migrations/20261124000100_schema.sql`, `…0200_auth_audit.sql`, `…0300_business_functions.sql`, `…0400_rls.sql`, lalu `supabase/seed.sql`.
+- **SQL Editor (paling mudah)**: buka Supabase Dashboard › SQL Editor › New query, tempel **seluruh isi `supabase/setup.sql`** (gabungan semua migrasi + seed), lalu klik **Run**. Untuk database baru saja.
+  Edge Function `admin-users` dapat dibuat lewat Dashboard › Edge Functions (salin `supabase/functions/admin-users/index.ts`, matikan *Verify JWT*) atau `supabase functions deploy admin-users --no-verify-jwt`.
 
 ### 3. Buat administrator pertama
 Di **Authentication › Users › Add user** buat akun (centang *Auto Confirm*). **Pengguna pertama otomatis menjadi Administrator aktif.** Pengguna berikutnya dibuat dari aplikasi (Pengaturan › Pengguna & Akses, memakai Edge Function `admin-users`) atau dari Dashboard lalu diaktifkan administrator.
 
 ### 4. Konfigurasi aplikasi
 ```bash
-cp .env.example .env        # isi SUPABASE_URL dan SUPABASE_ANON_KEY
+cp .env.example .env        # isi SUPABASE_URL dan SUPABASE_PUBLISHABLE_KEY
 node scripts/build-env.mjs  # menulis js/env.js
 ```
-`js/env.js` hanya berisi URL dan **anon key** — keduanya memang publik; keamanan data dijamin RLS. Skrip menolak service role key atau secret key.
+`js/env.js` hanya berisi URL dan **publishable key** — keduanya memang publik; keamanan data dijamin RLS. Skrip menolak secret/service role key dan mengabaikan `SUPABASE_SECRET_KEY` bila ada di `.env`.
+
+> Tentang `@supabase/server`: paket itu untuk backend Node/Deno. Aplikasi ini tidak memiliki server Node — backend-nya adalah fungsi PostgreSQL (RPC) dan satu Edge Function yang sudah memverifikasi pemanggil dengan `auth.getUser()`, sehingga paket tersebut tidak diperlukan.
 
 ### 5. Hosting
-- **GitHub Pages**: isi repository variables `SUPABASE_URL`, `SUPABASE_ANON_KEY`, aktifkan Pages (Source: GitHub Actions). Workflow **Deploy GitHub Pages** membangun `js/env.js` dan mempublikasikan situs saat ada push ke `main`.
+- **GitHub Pages**: aktifkan Pages (Source: GitHub Actions). `js/env.js` di repository sudah berisi konfigurasi proyek; repository variables `SUPABASE_URL` dan `SUPABASE_PUBLISHABLE_KEY` (opsional) akan menimpanya saat deploy. Aktifkan Pages (Source: GitHub Actions). Workflow **Deploy GitHub Pages** membangun `js/env.js` dan mempublikasikan situs saat ada push ke `main`.
 - Atau hosting statis lain (Netlify, Vercel, server sendiri) — jalankan `node scripts/build-env.mjs` saat build.
 
 Tambahkan URL situs ke **Authentication › URL Configuration** (Site URL / Redirect URLs).

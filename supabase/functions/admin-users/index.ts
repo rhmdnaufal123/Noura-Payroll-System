@@ -3,9 +3,11 @@
 // Service role key hanya tersedia di lingkungan server Supabase (variabel bawaan fungsi),
 // TIDAK pernah dikirim ke browser.
 //
-// Deploy: supabase functions deploy admin-users
+// Deploy: supabase functions deploy admin-users --no-verify-jwt
+// (verifikasi JWT gateway dimatikan karena proyek memakai kunci API format baru; fungsi ini
+//  memverifikasi sendiri token pemanggil lewat auth.getUser() dan memeriksa role administrator.)
 // Dipanggil aplikasi: supabase.functions.invoke('admin-users', { body: { action, ... } })
-import { createClient } from 'npm:@supabase/supabase-js@2.45.4';
+import { createClient } from 'npm:@supabase/supabase-js@2.119.0';
 
 const cors = {
   'Access-Control-Allow-Origin': '*',
@@ -19,9 +21,11 @@ Deno.serve(async (req) => {
   if (req.method === 'OPTIONS') return new Response('ok', { headers: cors });
   if (req.method !== 'POST') return json(405, { error: 'Metode tidak didukung.' });
 
+  // Kunci disuntikkan otomatis oleh Supabase di Edge Functions (format baru, dengan cadangan format lama).
   const url = Deno.env.get('SUPABASE_URL')!;
-  const anonKey = Deno.env.get('SUPABASE_ANON_KEY')!;
-  const serviceKey = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')!;
+  const anonKey = Deno.env.get('SUPABASE_PUBLISHABLE_KEY') ?? Deno.env.get('SUPABASE_ANON_KEY')!;
+  const serviceKey = Deno.env.get('SUPABASE_SECRET_KEY') ?? Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')!;
+  if (!url || !anonKey || !serviceKey) return json(500, { error: 'Variabel lingkungan Supabase pada fungsi belum tersedia.' });
 
   // 1. Pastikan pemanggil adalah administrator aktif (memakai token pemanggil, tunduk RLS).
   const caller = createClient(url, anonKey, { global: { headers: { Authorization: req.headers.get('Authorization') ?? '' } }, auth: { persistSession: false } });

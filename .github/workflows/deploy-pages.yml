@@ -1,5 +1,6 @@
 # Publikasikan aplikasi ke GitHub Pages dengan konfigurasi Supabase dari repository variables.
-# Variables (BUKAN secrets, karena tidak sensitif): SUPABASE_URL, SUPABASE_ANON_KEY.
+# Variables (BUKAN secrets, karena tidak sensitif): SUPABASE_URL, SUPABASE_PUBLISHABLE_KEY.
+# Bila variables kosong, js/env.js yang ada di repository dipakai apa adanya.
 # Aktifkan: Settings › Pages › Source: GitHub Actions.
 name: Deploy GitHub Pages
 on:
@@ -27,10 +28,11 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 20
-      - name: Buat js/env.js (menolak service role key)
+      - name: Buat js/env.js (menolak secret/service role key)
+        if: ${{ vars.SUPABASE_URL != '' }}
         env:
           SUPABASE_URL: ${{ vars.SUPABASE_URL }}
-          SUPABASE_ANON_KEY: ${{ vars.SUPABASE_ANON_KEY }}
+          SUPABASE_PUBLISHABLE_KEY: ${{ vars.SUPABASE_PUBLISHABLE_KEY }}
           APP_ENV: production
         run: node scripts/build-env.mjs
       - name: Siapkan file situs

@@ -15,16 +15,21 @@ if (existsSync(envFile)) {
     if (m && !line.trim().startsWith('#')) env[m[1]] = m[2].replace(/^['"]|['"]$/g, '');
   }
 }
-for (const k of ['SUPABASE_URL', 'SUPABASE_ANON_KEY', 'APP_ENV']) if (process.env[k]) env[k] = process.env[k];
+for (const k of ['SUPABASE_URL', 'SUPABASE_PUBLISHABLE_KEY', 'SUPABASE_ANON_KEY', 'APP_ENV']) if (process.env[k]) env[k] = process.env[k];
+if (env.SUPABASE_SECRET_KEY || env.SUPABASE_SERVICE_ROLE_KEY) {
+  console.warn('build-env: SUPABASE_SECRET_KEY/SERVICE_ROLE_KEY ditemukan di .env dan DIABAIKAN (tidak pernah ditulis ke frontend).');
+}
 
 const url = (env.SUPABASE_URL || '').trim();
-const key = (env.SUPABASE_ANON_KEY || '').trim();
+// Kunci publik: format baru "sb_publishable_..." atau anon key lama (JWT).
+const key = (env.SUPABASE_PUBLISHABLE_KEY || env.SUPABASE_ANON_KEY || '').trim();
 function fail(msg) {
   console.error('build-env: ' + msg);
   process.exit(1);
 }
 if (url && !/^https:\/\/[a-z0-9-]+\.supabase\.(co|in)$|^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/.test(url.replace(/\/$/, ''))) fail('SUPABASE_URL tidak valid: ' + url);
-if (key.startsWith('sb_secret_')) fail('SUPABASE_ANON_KEY berisi SECRET key. Gunakan anon/publishable key.');
+if (key.startsWith('sb_secret_')) fail('Kunci publik berisi SECRET key. Gunakan publishable key (sb_publishable_...).');
+if (key && !key.startsWith('sb_publishable_') && key.split('.').length !== 3) fail('Format kunci publik tidak dikenali. Gunakan publishable key (sb_publishable_...) atau anon key.');
 if (key.split('.').length === 3) {
   try {
     const payload = JSON.parse(Buffer.from(key.split('.')[1], 'base64url').toString('utf8'));
@@ -33,7 +38,7 @@ if (key.split('.').length === 3) {
     if (e && e.message && e.message.startsWith('build-env')) throw e;
   }
 }
-if (!!url !== !!key) fail('SUPABASE_URL dan SUPABASE_ANON_KEY harus diisi keduanya (atau dikosongkan keduanya untuk mode lokal).');
+if (!!url !== !!key) fail('SUPABASE_URL dan SUPABASE_PUBLISHABLE_KEY harus diisi keduanya (atau dikosongkan keduanya untuk mode lokal).');
 
 const conf = { SUPABASE_URL: url.replace(/\/$/, ''), SUPABASE_ANON_KEY: key, APP_ENV: env.APP_ENV || (url ? 'production' : 'local') };
 const out = `/* Dihasilkan oleh scripts/build-env.mjs — konfigurasi TIDAK SENSITIF.

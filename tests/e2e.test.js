@@ -11,6 +11,11 @@ const { chromium } = require('playwright');
 const ROOT = path.join(__dirname, '..');
 const TYPES = { '.html': 'text/html', '.js': 'application/javascript', '.css': 'text/css', '.json': 'application/json', '.png': 'image/png' };
 const server = http.createServer((req, res) => {
+  // Uji ini selalu memakai mode lokal (IndexedDB), apa pun isi js/env.js di repository.
+  if (req.url.split('?')[0] === '/js/env.js') {
+    res.writeHead(200, { 'Content-Type': 'application/javascript' });
+    return res.end('window.NP_CONFIG = { SUPABASE_URL: "", SUPABASE_ANON_KEY: "" };');
+  }
   const p = path.join(ROOT, decodeURIComponent(req.url.split('?')[0]).replace(/^\/$/, '/index.html'));
   if (!p.startsWith(ROOT) || !fs.existsSync(p) || fs.statSync(p).isDirectory()) {
     res.writeHead(404);

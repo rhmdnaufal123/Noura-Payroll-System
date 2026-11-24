@@ -27,8 +27,8 @@ jobs:
           node-version: 20
       - name: Pasang dependensi uji
         run: npm install --no-audit --no-fund
-      - name: Seed SQL sesuai js/defaults.js
-        run: node scripts/generate-seed.mjs && git diff --exit-code supabase/seed.sql
+      - name: Seed & setup.sql sesuai sumbernya
+        run: node scripts/generate-seed.mjs && node scripts/build-setup-sql.mjs && git diff --exit-code supabase/seed.sql supabase/setup.sql
       - name: Uji unit
         run: node tests/unit.test.js
       - name: Pasang klien PostgreSQL

@@ -5,4 +5,4 @@ project_id = "noura-payroll"
 major_version = 15
 
 [functions.admin-users]
-verify_jwt = true
+verify_jwt = false  # diverifikasi di dalam fungsi (auth.getUser + cek role admin)
