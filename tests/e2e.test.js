@@ -814,10 +814,15 @@ async function step(name, fn) {
     // halaman pratinjau tetap sama saat pratinjau digambar ulang (mis. klik label dengan/tanpa dokter)
     await page.click('#pos-table [data-pg=next]');
     await page.waitForFunction(() => /^2\//.test(document.querySelector('#pos-table .pg-num').textContent));
-    await page.uncheck('.pos-cats input[data-cat="HOMECARE"]');
-    await page.waitForFunction(() => { const c = document.querySelector('.pos-cats input[data-cat="HOMECARE"]'); return c && !c.checked; });
-    await page.check('.pos-cats input[data-cat="HOMECARE"]');
-    await page.waitForFunction(() => { const c = document.querySelector('.pos-cats input[data-cat="HOMECARE"]'); return c && c.checked; });
+    // tunggu sampai pratinjau benar-benar digambar ulang (elemen lama terlepas), bukan hanya kotak centangnya berubah
+    const rerendered = async (fn) => {
+      const old = await page.$('#pos-table');
+      await fn();
+      await page.waitForFunction((el) => !el.isConnected && document.querySelector('#pos-table .pg-num'), old);
+    };
+    await rerendered(() => page.uncheck('.pos-cats input[data-cat="HOMECARE"]'));
+    await rerendered(() => page.check('.pos-cats input[data-cat="HOMECARE"]'));
+    assert.ok(await page.locator('.pos-cats input[data-cat="HOMECARE"]').isChecked());
     assert.ok(/^2\//.test(await page.locator('#pos-table .pg-num').innerText()), 'halaman pratinjau kembali ke awal');
     const btn = page.locator('[data-act=import]');
     assert.ok(await btn.isEnabled(), await page.locator('#pos-body').innerText());
