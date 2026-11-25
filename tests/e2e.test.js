@@ -38,7 +38,7 @@ async function step(name, fn) {
     if (process.env.E2E_SHOTS && shotPage) await shotPage.screenshot({ path: path.join(process.env.E2E_SHOTS, 'fail-' + failures.length + '.png') }).catch(() => {});
     // tutup modal yang tertinggal agar langkah berikutnya tidak terhalang
     if (shotPage) await shotPage.evaluate(() => document.querySelectorAll('.modal-backdrop').forEach((m) => m.remove())).catch(() => {});
-    console.log('  ✗ ' + name + '\n    ' + (e.stack || e.message).split('\n').slice(0, 3).join('\n    '));
+    console.log('  ✗ ' + name + '\n    ' + (e.stack || e.message).split('\n').slice(0, process.env.E2E_VERBOSE ? 30 : 3).join('\n    '));
   }
 }
 
@@ -78,6 +78,14 @@ async function step(name, fn) {
     page.waitForFunction((src) => new RegExp(src).test([...document.querySelectorAll('.toast')].map((t) => t.textContent).join(' ')), re.source, { timeout: 30000 }).catch(async (e) => {
       throw new Error('Toast /' + re.source + '/ tidak muncul. Toast: ' + (await page.locator('.toast').allInnerTexts().catch(() => [])).join(' | '));
     });
+  /** Jalankan aksi lalu tunggu toast BARU yang cocok (toast lama yang masih tampil diabaikan). */
+  const newToast = async (fn, re) => {
+    await page.evaluate(() => document.querySelectorAll('.toast').forEach((t) => (t.dataset.seen = '1')));
+    await fn();
+    await page.waitForFunction((src) => [...document.querySelectorAll('.toast:not([data-seen])')].some((t) => new RegExp(src).test(t.textContent)), re.source, { timeout: 30000 }).catch(async () => {
+      throw new Error('Toast baru /' + re.source + '/ tidak muncul. Toast: ' + (await page.locator('.toast').allInnerTexts().catch(() => [])).join(' | '));
+    });
+  };
   const modalBtn = (label) => page.locator('.modal-backdrop').last().locator('.modal-foot button', { hasText: label });
   const download = async (fn) => {
     const [d] = await Promise.all([page.waitForEvent('download', { timeout: 60000 }), fn()]);
@@ -266,6 +274,12 @@ async function step(name, fn) {
   });
 
   console.log('Input tindakan');
+  const prevMonthEarly = (() => {
+    const d = new Date();
+    d.setDate(1);
+    d.setMonth(d.getMonth() - 1);
+    return d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-03';
+  })();
   let trxGula;
   await step('input Gula Darah × 5 oleh bidan baru: Rp140.000 / Rp90.000 / Rp50.000', async () => {
     await go('input');
@@ -372,6 +386,106 @@ async function step(name, fn) {
     assert.deepStrictEqual(got, [{ wd: false, roles: ['bidan'], klinik: 160000, dokter: 0, bidan: 40000 }, { wd: true, roles: ['bidan', 'dokter'], klinik: 120000, dokter: 60000, bidan: 20000 }]);
     await go('transactions');
     assert.ok(/Suntik Vitamin Uji \(dengan dokter\)/.test(await page.locator('#view').innerText()));
+  });
+  await step('input tindakan: pasien yang diperiksa dokter → otomatis "dengan dokter", tetap dapat diubah', async () => {
+    const ids = await ev(async () => {
+      const s = await NP.db.all('services');
+      const e = await NP.db.all('employees');
+      const bd = e.find((x) => x.position === 'Bidan' && x.status === 'aktif' && x.name !== 'Bd. Uji Coba');
+      return { sv: s.find((x) => x.name === 'Suntik Vitamin Uji').id, kons: s.find((x) => x.name === 'Konsultasi Dokter Umum').id, dr: e.find((x) => x.name === 'dr. Siti Rahmawati').id, bd: bd.id };
+    });
+    // 1) pemeriksaan dokter untuk pasien ini hari ini
+    await go('input');
+    await page.selectOption('.item-row [data-f=serviceId]', ids.kons);
+    await page.selectOption('.item-row [data-perf=dokter]', ids.dr);
+    await page.fill('.input-form [name=patient]', 'Ny. Periksa Dokter');
+    await clickToast('[data-act=save]', /tersimpan/);
+    // 2) tindakan berikutnya untuk pasien yang sama (penulisan berbeda) → otomatis dengan dokter
+    await page.selectOption('.item-row [data-f=serviceId]', ids.sv);
+    await page.waitForSelector('.item-variant [data-wd="0"].active');
+    await page.fill('.input-form [name=patient]', 'NY. PERIKSA DOKTER');
+    await page.waitForSelector('.item-variant [data-wd="1"].active');
+    assert.ok(/Otomatis dengan dokter: pasien ini diperiksa dokter/.test(await page.locator('.item-variant').innerText()));
+    assert.strictEqual(await page.inputValue('.item-row [data-perf=dokter]'), ids.dr, 'dokter pelaksana = dokter yang memeriksa');
+    // ubah manual ke tanpa dokter → tidak ditimpa lagi oleh aturan otomatis
+    await page.click('.item-variant [data-wd="0"]');
+    await page.fill('.input-form [name=patient]', 'Ny. Periksa Dokter ');
+    await page.waitForTimeout(400);
+    assert.ok(await page.locator('.item-variant [data-wd="0"].active').count(), 'pilihan manual dipertahankan');
+    assert.ok(/diubah manual/.test(await page.locator('.item-variant').innerText()));
+    assert.ok(/Jadikan dengan dokter/.test(await page.locator('#wd-hint').innerText()), 'saran tetap ditampilkan');
+    await page.click('#wd-hint [data-act=wd-all]');
+    await page.waitForSelector('.item-row [data-perf=dokter]');
+    await page.selectOption('.item-row [data-perf=dokter]', ids.dr);
+    if (!(await page.inputValue('.item-row [data-perf=bidan]'))) await page.selectOption('.item-row [data-perf=bidan]', ids.bd);
+    await clickToast('[data-act=save]', /tersimpan/);
+    const t = await ev(async () => (await NP.db.all('transactions')).filter((x) => /periksa dokter/i.test(x.patient)).map((x) => x.items.map((i) => [i.serviceName, !!i.withDoctor])));
+    assert.deepStrictEqual(t.sort(), [[['Konsultasi Dokter Umum', false]], [['Suntik Vitamin Uji', true]]].sort());
+    // 3) pemeriksaan dokter dalam transaksi yang sama (tanpa nama pasien pun) → otomatis
+    await page.selectOption('.item-row [data-f=serviceId]', ids.kons);
+    await page.click('[data-act=add-row]');
+    await page.selectOption('.item-row >> nth=1 >> [data-f=serviceId]', ids.sv);
+    await page.waitForSelector('.item-row >> nth=1 >> .item-variant [data-wd="1"].active');
+    await page.click('[data-act=reset]');
+  });
+  await step('daftar Input Tindakan: dengan/tanpa dokter satu per satu, saran & otomasi', async () => {
+    const ids = await ev(async () => {
+      const s = await NP.db.all('services');
+      const e = await NP.db.all('employees');
+      const bd = e.find((x) => x.position === 'Bidan' && x.status === 'aktif' && x.name !== 'Bd. Uji Coba');
+      return { sv: s.find((x) => x.name === 'Suntik Vitamin Uji').id, kons: s.find((x) => x.name === 'Konsultasi Dokter Umum').id, dr: e.find((x) => x.name === 'dr. Siti Rahmawati').id, bd: bd.id };
+    });
+    const itemOf = (patient) => ev(async (p) => {
+      const t = (await NP.db.all('transactions')).find((x) => x.patient === p && x.items.some((i) => i.serviceName === 'Suntik Vitamin Uji'));
+      const i = t.items.find((x) => x.serviceName === 'Suntik Vitamin Uji');
+      return { id: t.id, wd: !!i.withDoctor, dokter: i.performers.dokter || '', bidan: i.performers.bidan || '' };
+    }, patient);
+    await go('input');
+    // 1) tindakan dulu (tanpa dokter), pemeriksaan dokter kemudian → ditawari mengubah otomatis
+    await page.fill('.input-form [name=patient]', 'Tn. Urutan Dua');
+    await page.selectOption('.item-row [data-f=serviceId]', ids.sv);
+    await page.selectOption('.item-row [data-perf=bidan]', ids.bd);
+    await clickToast('[data-act=save]', /tersimpan/);
+    assert.strictEqual((await itemOf('Tn. Urutan Dua')).wd, false);
+    await page.fill('.input-form [name=patient]', 'Tn. Urutan Dua');
+    await page.selectOption('.item-row [data-f=serviceId]', ids.kons);
+    await page.selectOption('.item-row [data-perf=dokter]', ids.dr);
+    await page.click('[data-act=save]');
+    await page.waitForSelector('.modal-head:has-text("Pasien diperiksa dokter")');
+    await newToast(() => modalBtn('Ya, ubah').click(), /1 transaksi diubah menjadi dengan dokter/);
+    let it = await itemOf('Tn. Urutan Dua');
+    assert.deepStrictEqual([it.wd, it.dokter, it.bidan], [true, ids.dr, ids.bd], 'dokter pelaksana = dokter yang memeriksa');
+    // 2) daftar: label dapat diklik satu per satu
+    const lbl = () => page.locator(`#today-list [data-tl="${it.id}"]`);
+    await page.waitForFunction((id) => { const b = document.querySelector('#today-list [data-tl="' + id + '"]'); return b && /dengan dokter/.test(b.textContent); }, it.id);
+    await newToast(() => lbl().click(), /→ tanpa dokter/);
+    assert.strictEqual((await itemOf('Tn. Urutan Dua')).wd, false);
+    // 3) aturan otomatis: tindakan pasien yang diperiksa dokter ditandai & dapat diterapkan sekaligus
+    await page.waitForSelector('#tl-auto [data-act=tl-auto]');
+    assert.ok(/Terapkan otomatis \(1\)/.test(await page.locator('#tl-auto').innerText()));
+    assert.ok(await page.locator('#today-list tr.tl-sugg').count() >= 1);
+    await newToast(() => page.click('#tl-auto [data-act=tl-auto]'), /1 transaksi diubah menjadi dengan dokter/);
+    it = await itemOf('Tn. Urutan Dua');
+    assert.deepStrictEqual([it.wd, it.dokter], [true, ids.dr]);
+    await page.waitForFunction(() => !document.querySelector('#tl-auto [data-act=tl-auto]'));
+    // 4) dokter belum diketahui → aplikasi menanyakan dokter
+    await page.fill('.input-form [name=patient]', 'Ny. Tanpa Periksa');
+    await page.selectOption('.item-row [data-f=serviceId]', ids.sv);
+    await page.selectOption('.item-row [data-perf=bidan]', ids.bd);
+    await clickToast('[data-act=save]', /tersimpan/);
+    const t2 = await itemOf('Ny. Tanpa Periksa');
+    await page.waitForSelector(`#today-list [data-tl="${t2.id}"]`);
+    await page.click(`#today-list [data-tl="${t2.id}"]`);
+    await page.waitForSelector('.modal-head:has-text("Dokter pelaksana")');
+    await page.selectOption('.modal [name=doc]', ids.dr);
+    await newToast(() => modalBtn('Pilih').click(), /→ dengan dokter/);
+    assert.deepStrictEqual([(await itemOf('Ny. Tanpa Periksa')).wd, (await itemOf('Ny. Tanpa Periksa')).dokter], [true, ids.dr]);
+    // 5) tanggal daftar mengikuti tanggal form
+    await page.fill('.input-form [name=date]', prevMonthEarly);
+    await page.dispatchEvent('.input-form [name=date]', 'change');
+    await page.waitForFunction((d) => document.querySelector('#tl-date').value === d, prevMonthEarly);
+    await page.fill('.input-form [name=date]', await ev(() => NP.u.todayISO()));
+    await page.dispatchEvent('.input-form [name=date]', 'change');
   });
   await step('tanpa memilih petugas → tidak bisa disimpan', async () => {
     await go('input');
@@ -550,6 +664,59 @@ async function step(name, fn) {
     const html = await download(() => page.click('#sl-actions [data-act=html]'));
     const content = fs.readFileSync(html.path, 'utf8');
     assert.ok(/SLIP GAJI/.test(content) && /TAKE HOME PAY/.test(content) && !/STR-/.test(content));
+    // cap digital pengesahan ikut di file HTML
+    assert.ok(/class="s-stamp" src="data:image\/svg\+xml;base64,/.test(content) && /Kode verifikasi/.test(content), 'cap digital di HTML');
+  });
+  await step('cap digital: tanggal & jam pengesahan, kode verifikasi, ikut di PNG/PDF; draft tanpa cap', async () => {
+    await go('payslips');
+    await page.waitForSelector('#sl-vp .slip .s-sah');
+    const sah = await page.locator('#sl-vp .s-sah').innerText();
+    const m = sah.match(/Disahkan secara digital pada (\d{1,2} \w+ \d{4}) pukul (\d{2}\.\d{2}) WIB.*Kode verifikasi ([0-9A-F]{4}-[0-9A-F]{4})/);
+    assert.ok(m, sah);
+    // isi cap: label, tanggal, jam, kode (SVG di dalam gambar)
+    const svg = await ev(() => atob(document.querySelector('#sl-vp .s-stamp').src.split(',')[1]));
+    assert.ok(/DISAHKAN/.test(svg) && new RegExp(m[2] + ' WIB').test(svg) && svg.includes(m[3]), 'isi cap');
+    // waktu cap = saat penggajian disetujui (WIB)
+    const exp = await ev(async () => {
+      const run = (await NP.payroll.runs()).find((r) => r.status !== 'draft' && r.slips.length);
+      const s = run.slips[0];
+      return { code: NP.slip.verifyCode(run, s), info: NP.slip.stampInfo(run, s), approvedAt: run.approvedAt, draft: (await NP.payroll.runs()).find((r) => r.status === 'draft' && r.slips.length) };
+    });
+    assert.ok(exp.code && /^[0-9A-F]{4}-[0-9A-F]{4}$/.test(exp.code));
+    // PNG/PDF (html2canvas): cap benar-benar tergambar → piksel hijau di area tanda tangan bertambah
+    const px = await ev(async () => {
+      const run = (await NP.payroll.runs()).find((r) => r.status !== 'draft' && r.slips.length);
+      const s = run.slips[0];
+      const green = async (on) => {
+        const old = NP.state.settings.slip.stampEnabled;
+        NP.state.settings.slip.stampEnabled = on;
+        const c = await NP.exp.toCanvas(NP.slip.html(run, s), 794);
+        NP.state.settings.slip.stampEnabled = old;
+        const d = c.getContext('2d').getImageData(0, Math.floor(c.height * 0.6), Math.floor(c.width / 2), Math.floor(c.height * 0.4)).data;
+        let n = 0;
+        for (let i = 0; i < d.length; i += 4) if (d[i + 1] > d[i] + 40 && d[i + 1] > d[i + 2] + 20) n++;
+        return n;
+      };
+      return { on: await green(true), off: await green(false) };
+    });
+    assert.ok(px.on - px.off > 3000, 'cap tidak tergambar di PNG/PDF: ' + JSON.stringify(px));
+    // verifikasi kode di halaman Slip Gaji
+    await page.click('[data-act=verify]');
+    await page.fill('.modal [name=v]', m[3].toLowerCase());
+    await modalBtn('Periksa').click();
+    await page.waitForSelector('.modal-head:has-text("Slip sah")');
+    await modalBtn('Tampilkan slip').click();
+    await page.click('[data-act=verify]');
+    await page.fill('.modal [name=v]', '0000-0000');
+    await modalBtn('Periksa').click();
+    await page.waitForSelector('.modal-head:has-text("Kode tidak dikenal")');
+    await modalBtn('Tutup').click();
+    // slip draft tidak diberi cap
+    const draftHtml = await ev(async () => {
+      const run = (await NP.payroll.runs()).find((r) => r.status === 'draft' && r.slips.length);
+      return run ? NP.slip.html(run, run.slips[0]) : null;
+    });
+    if (draftHtml) assert.ok(!/s-stamp/.test(draftHtml) && /DRAFT/.test(draftHtml));
   });
   await step('unduh seluruh slip dalam ZIP', async () => {
     const z = await download(() => page.click('[data-act=zip]'));
@@ -630,9 +797,11 @@ async function step(name, fn) {
       await ev(async () => {
         for (const s of await NP.svc.all()) if (/^pemeriksaan asam urat$/i.test(s.name)) await NP.svc.save(Object.assign({}, s, { name: s.name + ' (tarif lama)' }));
       });
-      await page.click('.pos-cats input[data-cat="HOMECARE"]');
-      await page.click('.pos-cats input[data-cat="HOMECARE"]');
-      await page.waitForSelector('.pos-cats');
+      // render ulang pratinjau (lepas lalu centang lagi), menunggu setiap render selesai
+      await page.uncheck('.pos-cats input[data-cat="HOMECARE"]');
+      await page.waitForFunction(() => { const c = document.querySelector('.pos-cats input[data-cat="HOMECARE"]'); return c && !c.checked; });
+      await page.check('.pos-cats input[data-cat="HOMECARE"]');
+      await page.waitForFunction(() => { const c = document.querySelector('.pos-cats input[data-cat="HOMECARE"]'); return c && c.checked && !/melebihi harga jual/.test(document.querySelector('#pos-body').innerText); });
     }
     const cats = await page.locator('.pos-cats input:checked').evaluateAll((els) => els.map((e) => e.dataset.cat).sort());
     assert.deepStrictEqual(cats, ['DOKTER DAN BIDAN', 'HOMECARE']);
@@ -672,6 +841,108 @@ async function step(name, fn) {
     assert.ok(/^analisis-tindakan-.*\.xlsx$/.test(x.name), x.name);
     await page.fill('#an-q', '');
     await page.click('.seg-btn[data-group=ALL]');
+  });
+  await step('impor biaya dokter dari file resep: pilih dokter, tandai pasien sama & service < Rp100.000', async () => {
+    const XLSX = require(path.join(ROOT, 'vendor', 'xlsx.full.min.js'));
+    const rf = require('./support/resep-fixture.js');
+    const rxFile = rf.writeXlsx(XLSX, path.join(require('os').tmpdir(), 'penebusan-resep-uji.xlsx'), { year: +prevMonth.slice(0, 4), month: +prevMonth.slice(5), doctor: 'dr. Siti Rahmawati' });
+    await go('bulk?tab=resep');
+    const [fc] = await Promise.all([page.waitForEvent('filechooser'), page.click('[data-rx=pick]')]);
+    await fc.setFiles(rxFile);
+    await page.waitForSelector('#rx-table tbody tr');
+    // dokter yang cocok dengan Data Karyawan otomatis dicentang; dokter luar tidak
+    assert.ok(await page.locator('[data-doc="dr. Siti Rahmawati"]').isChecked());
+    assert.ok(!(await page.locator('[data-doc="Puskesmas Contoh"]').isChecked()));
+    const sid = await ev(async () => (await NP.db.all('employees')).find((e) => e.name === 'dr. Siti Rahmawati').id);
+    assert.strictEqual(await page.inputValue('[data-docmap="dr. Siti Rahmawati"]'), sid);
+    assert.ok(await page.inputValue('[data-rxsvc]'), 'master tindakan pemeriksaan dokter disarankan otomatis');
+    assert.strictEqual(await page.locator('#rx-table tbody tr').count(), 7);
+    // penanda: 2 di bawah Rp100.000 (satu Rp0), 3 pasien sama dengan file kasir yang dimuat di tab POS
+    assert.strictEqual(await page.locator('#rx-table tr.rx-low, #rx-table tr.rx-zero').count(), 2);
+    assert.strictEqual(await page.locator('#rx-table tr.rx-zero input[data-inc]').isDisabled(), true);
+    assert.strictEqual(await page.locator('#rx-table tr.rx-dup').count(), 3);
+    assert.ok(/Kasir SIN-/.test(await page.locator('#rx-table tr.rx-dup').first().innerText()));
+    await page.check('[data-rx-only]');
+    await page.waitForFunction(() => document.querySelectorAll('#rx-table tbody tr').length === 4);
+    await page.uncheck('[data-rx-only]');
+    await page.waitForFunction(() => document.querySelectorAll('#rx-table tbody tr').length === 7);
+    // dokter luar ikut dicentang → baris bertambah, lalu dilepas lagi
+    await page.check('[data-doc="Puskesmas Contoh"]');
+    await page.waitForFunction(() => document.querySelectorAll('#rx-table tbody tr').length === 9);
+    await page.uncheck('[data-doc="Puskesmas Contoh"]');
+    await page.waitForFunction(() => document.querySelectorAll('#rx-table tbody tr').length === 7);
+    const n = await page.locator('#rx-table input[data-inc]:checked').count();
+    assert.ok(n >= 4, 'resep yang dicentang: ' + n);
+    assert.ok(new RegExp('Impor ' + n + ' biaya dokter').test(await page.locator('[data-rx=import]').innerText()));
+    await page.click('[data-rx=import]');
+    await modalBtn('Impor sekarang').click();
+    await waitToast(/biaya dokter diimpor/);
+    const got = await ev(async (id) => {
+      const ts = (await NP.db.all('transactions')).filter((t) => t.externalRef && t.externalRef.startsWith('RESEP:'));
+      return { n: ts.length, docs: [...new Set(ts.map((t) => t.items[0].performers.dokter))], low: ts.filter((t) => t.items[0].price < 100000).length, noteOk: ts.every((t) => /Biaya pemeriksaan dokter/.test(t.note)), id };
+    }, sid);
+    assert.deepStrictEqual([got.n, got.docs, got.noteOk], [n, [sid], true]);
+    assert.strictEqual(got.low, 1, 'Rp50.000 ikut diimpor (ditandai, bukan dilewati)');
+    // impor ulang: semua sudah pernah diimpor
+    await page.waitForSelector('[data-rx=import][disabled]');
+    assert.ok(/Sudah pernah diimpor/.test(await page.locator('#rx-table').innerText()));
+  });
+  await step('tab resep: tindakan pasien yang diperiksa dokter tapi tercatat tanpa dokter → diubah sekaligus', async () => {
+    const day3 = prevMonth + '-03';
+    const ids = await ev(async () => {
+      const s = await NP.db.all('services');
+      const e = await NP.db.all('employees');
+      const bd = e.find((x) => x.position === 'Bidan' && x.status === 'aktif' && x.name !== 'Bd. Uji Coba');
+      return { sv: s.find((x) => x.name === 'Suntik Vitamin Uji').id, bd: bd.id, dr: e.find((x) => x.name === 'dr. Siti Rahmawati').id };
+    });
+    const tid = await ev(async ([d, i]) => (await NP.trx.save({ date: d, patient: 'Ny. Pasien Uji 3', note: 'uji tanpa dokter', items: [{ serviceId: i.sv, qty: 1, price: 200000, withDoctor: false, performers: { bidan: i.bd } }] })).id, [day3, ids]);
+    await go('dashboard');
+    await go('bulk?tab=resep');
+    await page.waitForSelector('[data-rx=fix-wd]');
+    assert.ok(/1 transaksi tindakan/.test(await page.locator('#rx-body .alert-info').first().innerText()));
+    assert.ok(await page.locator('#rx-table a.flag-low', { hasText: 'Tercatat tanpa dokter' }).count());
+    await page.click('[data-rx=fix-wd]');
+    await modalBtn('Ubah').click();
+    await waitToast(/1 transaksi diubah menjadi dengan dokter/);
+    const t = await ev(async (id) => (await NP.trx.get(id)).items[0], tid);
+    assert.deepStrictEqual([t.withDoctor, t.performers.dokter, t.performers.bidan], [true, ids.dr, ids.bd]);
+    await page.waitForSelector('#rx-table');
+    assert.strictEqual(await page.locator('[data-rx=fix-wd]').count(), 0, 'tidak ada lagi yang perlu diubah');
+  });
+  await step('Data Karyawan: tombol Tambah Dokter & Tambah Bidan mengisi jabatan, unit & skema', async () => {
+    await go('employees');
+    await page.click('[data-act=add-dokter]');
+    await page.waitForSelector('.modal-head:has-text("Tambah Dokter")');
+    await page.click('.emp-form [data-tab=pekerjaan]');
+    assert.deepStrictEqual([await page.inputValue('.emp-form [name=unit]'), await page.inputValue('.emp-form [name=position]'), await page.inputValue('.emp-form [name=department]')], ['KLINIK', 'Dokter Umum', 'Pelayanan Medis']);
+    assert.ok(await page.locator('.emp-form [data-tab=nakes]').isVisible(), 'tab Tenaga Kesehatan tampil');
+    await page.click('.emp-form [data-tab=pribadi]');
+    await page.fill('.emp-form [name=name]', 'dr. Uji Tambahan');
+    await page.fill('.emp-form [name=phone]', '081277770001');
+    await page.click('.emp-form [data-tab=nakes]');
+    await page.fill('.emp-form [name=str]', 'STR-UJI-1');
+    await page.fill('.emp-form [name=sip]', 'SIP-UJI-1');
+    await modalBtn('Simpan').click();
+    await page.waitForSelector('.modal-backdrop', { state: 'detached' });
+    const d = await ev(async () => (await NP.db.all('employees')).find((x) => x.name === 'dr. Uji Tambahan'));
+    assert.deepStrictEqual([d.unit, d.position, d.payScheme, d.str, d.sip], ['KLINIK', 'Dokter Umum', 'service_only', 'STR-UJI-1', 'SIP-UJI-1']);
+    // tautan langsung dari halaman impor
+    await page.goto(BASE + '#/employees?add=bidan');
+    await page.waitForSelector('.modal-head:has-text("Tambah Bidan")');
+    await page.fill('.emp-form [name=name]', 'Bd. Uji Tambahan');
+    await page.fill('.emp-form [name=phone]', '081277770002');
+    assert.ok(/Isi gaji pokok/.test(await page.locator('.emp-form .alert-info').innerText()));
+    await page.click('.emp-form [data-tab=gaji]');
+    await page.fill('.emp-form [name=baseSalary]', '2100000');
+    await modalBtn('Simpan').click();
+    await page.waitForSelector('.modal-backdrop', { state: 'detached' });
+    const b = await ev(async () => (await NP.db.all('employees')).find((x) => x.name === 'Bd. Uji Tambahan'));
+    assert.deepStrictEqual([b.unit, b.position, b.department, b.payScheme], ['KLINIK', 'Bidan', 'Kebidanan', 'monthly_service']);
+    // bidan baru langsung bisa dipilih sebagai pelaksana
+    await go('input');
+    const sid = await ev(async () => (await NP.db.all('services')).find((x) => x.name === 'Pemeriksaan Gula Darah').id);
+    await page.selectOption('.item-row [data-f=serviceId]', sid);
+    assert.ok(await page.locator('.item-row [data-perf=bidan] option', { hasText: 'Bd. Uji Tambahan' }).count());
   });
   await step('input tindakan di iPad: kolom tanggal tidak menimpa nama pasien', async () => {
     for (const vp of [{ width: 1180, height: 820 }, { width: 820, height: 1180 }, { width: 1366, height: 900 }]) {

@@ -222,6 +222,12 @@ async function step(name, fn) {
     await B.waitForSelector('.slip .s-head');
     const [d] = await Promise.all([B.waitForEvent('download', { timeout: 60000 }), B.click('#sl-actions [data-act=pdf]')]);
     assert.ok(fs.statSync(await d.path()).size > 20000);
+    // cap digital: waktu pengesahan = approved_at di server (WIB)
+    const sah = await B.locator('#sl-vp .s-sah').innerText();
+    const srvTs = (await sql('select extract(epoch from approved_at)::bigint t from public.payroll_periods where id = $1', [ID.run]))[0].t * 1000;
+    const want = new Intl.DateTimeFormat('id-ID', { timeZone: 'Asia/Jakarta', hour: '2-digit', minute: '2-digit', hour12: false }).format(new Date(Number(srvTs))).replace(':', '.');
+    assert.ok(new RegExp('pukul ' + want.replace('.', '\\.') + ' WIB').test(sah) && /Kode verifikasi [0-9A-F]{4}-[0-9A-F]{4}/.test(sah), sah + ' / ' + want);
+    assert.strictEqual(await B.locator('#sl-vp img.s-stamp').count(), 1);
   });
 
   console.log('Penguncian & koreksi dengan otorisasi administrator');
@@ -342,6 +348,12 @@ async function step(name, fn) {
     assert.deepStrictEqual(r, [{ with_doctor: true, category: 'klinik', amount: 90000 }, { with_doctor: true, category: 'dokter', amount: 50000 }, { with_doctor: true, category: 'bidan', amount: 10000 }]);
     const t = await A.evaluate(async () => (await NP.trx.all()).find((x) => x.patient === 'Pasien Varian Dokter').items[0].withDoctor);
     assert.strictEqual(t, true);
+    // daftar Input Tindakan: ubah satu tindakan menjadi tanpa dokter → server memakai pembagian standar
+    const tid = (await sql("select id from public.service_transactions where patient_name = 'Pasien Varian Dokter'"))[0].id;
+    await A.waitForSelector(`#today-list [data-tl="${tid}"]`);
+    await toastAfter(A, () => A.click(`#today-list [data-tl="${tid}"]`), /→ tanpa dokter/);
+    const r2 = await sql("select i.with_doctor, a.category, a.amount::int from public.service_transaction_items i join public.service_transactions t on t.id = i.transaction_id join public.service_transaction_allocations a on a.item_id = i.id where t.patient_name = 'Pasien Varian Dokter' order by a.sort_order");
+    assert.deepStrictEqual(r2, [{ with_doctor: false, category: 'klinik', amount: 120000 }, { with_doctor: false, category: 'bidan', amount: 30000 }]);
   });
 
   await step('viewer hanya melihat laporan; tidak dapat membaca slip/penggajian rinci', async () => {

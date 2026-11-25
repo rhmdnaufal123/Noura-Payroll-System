@@ -368,5 +368,107 @@ console.log('Impor POS, input bulanan & analisis tindakan');
   });
 }
 
+console.log('Impor biaya dokter (penebusan resep)');
+{
+  js('resep-import.js');
+  const rf = require('./support/resep-fixture.js');
+  const pf = require('./support/pos-fixture.js');
+  const RF = rf.build();
+  const rx = NP.resep.parseSheet(RF.aoa);
+  const kasir = NP.pos.parseSheet(pf.build().aoa).lines;
+  const fee = { id: 'TND-0100', name: 'Pemeriksaan Dokter', category: 'Pemeriksaan dokter', unit: 'KLINIK', price: 100000, active: true, overrides: [], shares: [{ type: 'unit', target: 'KLINIK', mode: 'remainder', value: 0 }, { type: 'role', target: 'dokter', mode: 'percent', value: 70 }] };
+  const emps = [{ id: 'KRY-0009', name: 'dr. Contoh Dokter, Sp.PD', position: 'Dokter Umum', status: 'aktif' }];
+  const base = { doctors: new Set(['dr. Contoh Dokter']), docMap: { 'dr. Contoh Dokter': 'KRY-0009' }, service: fee, employees: emps, kasirLines: kasir, trxs: [] };
+
+  test('membaca file Penebusan Resep: periode, kolom Service, baris produk lanjutan', () => {
+    assert.strictEqual(rx.rows.length, RF.expect.rows);
+    assert.deepStrictEqual([rx.meta.from, rx.meta.to], ['2026-10-01', '2026-10-28']);
+    assert.deepStrictEqual([rx.rows[0].date, rx.rows[0].time, rx.rows[0].service, rx.rows[0].products.length], ['2026-10-01', '09:05', 100000, 2]);
+    assert.deepStrictEqual(Object.fromEntries(NP.resep.doctorSummary(rx.rows).map((d) => [d.doctor, d.count])), RF.expect.doctors);
+    assert.strictEqual(NP.resep.parseSheet(pf.build().aoa), null, 'file penjualan bukan file resep');
+  });
+  test('nama pasien dicocokkan tanpa sapaan, tanda baca & huruf besar/kecil', () => {
+    const k = NP.resep.patientKey;
+    assert.strictEqual(k('NY.PASIEN UJI 1'), k('Ny. PASIEN UJI 1'));
+    assert.strictEqual(k('ny pasien uji 5'), k('Ny. PASIEN UJI 5'));
+    assert.strictEqual(k('By. M.  MUJTABA'), 'M MUJTABA');
+    assert.notStrictEqual(k('Tn. RICO'), k('Tn. RICO A'));
+  });
+  test('rencana: hanya dokter terpilih; Rp0 dilewati; service < Rp100.000 & pasien sama ditandai', () => {
+    const P = NP.resep.plan(rx.rows, base);
+    const E = RF.expect.main;
+    assert.strictEqual(P.rows.length, E.rows, 'Puskesmas tidak ikut');
+    assert.deepStrictEqual([P.stats.low, P.stats.zero, P.stats.kasir], [E.low, E.zero, E.kasir]);
+    assert.strictEqual(P.transactions.length, E.importable);
+    assert.strictEqual(u.sum(P.transactions, (t) => t.items[0].price), E.gross);
+    assert.ok(P.transactions.every((t) => /^RESEP:Resep\/RXUJI-\d+$/.test(t.externalRef) && t.items[0].performers.dokter === 'KRY-0009' && t.items[0].serviceId === fee.id));
+    const low = P.rows.find((x) => x.service === 50000);
+    assert.ok(low.low && low.kasir.length === 1 && low.kasir[0].services.length > 0, 'struk kasir pasien yang sama memuat tindakan');
+    assert.deepStrictEqual(P.blocking, []);
+  });
+  test('rencana: dokter belum dicocokkan → diblokir; biaya dokter sudah tercatat / sudah diimpor → tidak ikut', () => {
+    const P1 = NP.resep.plan(rx.rows, Object.assign({}, base, { docMap: {} }));
+    assert.ok(P1.blocking.length > 0 && /Dokter pelaksana belum dipilih/.test(P1.blocking[0].problems.join(' ')));
+    const trxs = [
+      { id: 'TRX-1', date: '2026-10-03', patient: 'NY. PASIEN UJI 3', status: 'active', items: [{ serviceId: fee.id, serviceName: fee.name, qty: 1 }] },
+      { id: 'TRX-2', date: '2026-10-06', patient: 'x', status: 'active', externalRef: 'RESEP:Resep/RXUJI-4', items: [] }
+    ];
+    const P2 = NP.resep.plan(rx.rows, Object.assign({}, base, { trxs }));
+    const p3 = P2.rows.find((x) => x.code === 'Resep/RXUJI-2');
+    assert.ok(p3.db.length === 1 && p3.dbDoctorFee && !p3.include, 'biaya dokter pasien yang sama sudah ada → tidak dicentang');
+    assert.ok(P2.rows.find((x) => x.code === 'Resep/RXUJI-4').already);
+    assert.strictEqual(P2.transactions.length, RF.expect.main.importable - 2);
+    const P3 = NP.resep.plan(rx.rows, Object.assign({}, base, { trxs, included: new Set(['Resep/RXUJI-2']) }));
+    assert.strictEqual(P3.transactions.length, RF.expect.main.importable - 1, 'centang manual tetap dihormati');
+  });
+  test('indeks pemeriksaan dokter: database, file resep (service > 0), dan file kasir', () => {
+    const idx = NP.resep.examIndex({
+      trxs: [{ id: 'TRX-9', date: '2026-10-06', patient: 'TN. RESEP SATU', status: 'active', items: [{ serviceName: 'Pemeriksaan Dokter', category: 'Pemeriksaan dokter' }] }, { id: 'TRX-8', date: '2026-10-06', patient: 'Batal', status: 'cancelled', items: [{ serviceName: 'Pemeriksaan Dokter' }] }],
+      resepRows: rx.rows,
+      kasirLines: [{ ref: 'SIN-X', date: '2026-10-20', patient: 'Ny. Kasir', product: 'PEMERIKSAAN DOKTER UMUM HC' }, { ref: 'SIN-Y', date: '2026-10-20', patient: 'Ny. Obat', product: 'PARACETAMOL' }]
+    });
+    const has = (p, d) => (idx.get(NP.resep.patientKey(p) + '|' + d) || []).map((h) => h.src).sort();
+    assert.deepStrictEqual(has('Tn. Resep Satu', '2026-10-06'), ['db', 'resep']);
+    assert.deepStrictEqual(has('NY PASIEN UJI 1', '2026-10-01'), ['resep']);
+    assert.deepStrictEqual(has('An. RESEP DUA', '2026-10-07'), [], 'resep Rp0 bukan pemeriksaan');
+    assert.deepStrictEqual(has('Ny. Kasir', '2026-10-20'), ['kasir']);
+    assert.deepStrictEqual(has('Ny. Obat', '2026-10-20'), []);
+    assert.deepStrictEqual(has('Batal', '2026-10-06'), [], 'transaksi batal diabaikan');
+  });
+  test('impor POS: pasien yang juga diperiksa dokter → otomatis "dengan dokter", tetap dapat diubah manual', () => {
+    const pfx = pf.build();
+    const lines = NP.pos.parseSheet(pfx.aoa).lines;
+    // semua tindakan memiliki varian dengan/tanpa dokter
+    const svcs = pf.SERVICES.map(([name, cat, price], i) => ({
+      id: 'V' + i, name, category: cat === 'HOMECARE' ? 'Homecare' : 'Dokter Umum & Bidan', unit: 'KLINIK', price, active: true, overrides: [],
+      shares: [{ type: 'unit', target: 'KLINIK', mode: 'remainder', value: 0 }],
+      doctorShares: [{ type: 'unit', target: 'KLINIK', mode: 'remainder', value: 0 }, { type: 'role', target: 'dokter', mode: 'percent', value: 10 }]
+    }));
+    const examIndex = NP.resep.examIndex({ resepRows: rx.rows, docMap: { 'dr. Contoh Dokter': 'KRY-0009' } });
+    const opt = { defaults: { dokter: 'KRY-LAIN' }, roles: { dokter: emps }, doctorMode: 'exam', examIndex };
+    const P = NP.pos.plan(lines, svcs, emps, opt);
+    const byPatient = (n) => P.transactions.find((t) => t.patient === 'Ny. PASIEN UJI ' + n);
+    // hari 1, 3, 5: pasien sama dengan resep ber-service → dengan dokter; pasien lain tanpa dokter
+    for (const n of [1, 3, 5]) assert.ok(byPatient(n).items.every((i) => i.withDoctor && i.auto && i.examHits.some((h) => h.src === 'resep')), 'pasien ' + n);
+    assert.ok(byPatient(7).items.every((i) => !i.withDoctor), 'pasien tanpa pemeriksaan dokter');
+    assert.ok(P.transactions.filter((t) => !t.patient).every((t) => t.items.every((i) => !i.withDoctor || /PEMERIKSAAN DOKTER|struk/.test(JSON.stringify(i.examHits)))), 'tanpa nama pasien tidak dicocokkan');
+    // dokter pelaksana = dokter yang memeriksa (dari resep), bukan dokter default
+    const it = byPatient(1).items[0];
+    assert.strictEqual(it.performers.dokter, 'KRY-0009');
+    // ubahan manual menang atas otomatis
+    const P2 = NP.pos.plan(lines, svcs, emps, Object.assign({}, opt, { wdOverride: new Map([[it.ovKey, false]]) }));
+    const it2 = P2.transactions.find((t) => t.patient === 'Ny. PASIEN UJI 1').items[0];
+    assert.ok(!it2.withDoctor && it2.manual && !('dokter' in it2.performers));
+    // mode lain tetap tersedia
+    const never = NP.pos.plan(lines, svcs, emps, Object.assign({}, opt, { doctorMode: 'never' }));
+    assert.ok(never.transactions.every((t) => t.items.every((i) => !i.withDoctor)));
+  });
+  test('saran tindakan: "Pemeriksaan Dokter" dipilih, versi Homecare tidak', () => {
+    const list = [{ id: 'A', name: 'Pemeriksaan Dokter Umum HC', category: 'Homecare', price: 300000, active: true }, { id: 'B', name: 'Pemeriksaan Dokter', category: 'Dokter Umum & Bidan', price: 100000, active: true }, { id: 'C', name: 'Suntik KB', category: 'Tindakan kebidanan', price: 65000, active: true }];
+    assert.strictEqual(NP.resep.suggestService(list).id, 'B');
+    assert.strictEqual(NP.resep.suggestService(list.slice(2)), null);
+  });
+}
+
 console.log('\n' + passed + ' lulus, ' + failures.length + ' gagal');
 if (failures.length) process.exit(1);

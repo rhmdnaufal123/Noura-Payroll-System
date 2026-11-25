@@ -15,6 +15,12 @@
   emp.unitsOf = (e) => (e.unit === 'LINTAS' ? ['APT', 'KLINIK'] : [e.unit]);
   emp.isActive = (e) => e.status === 'aktif';
   emp.isHealth = (e) => ['dokter', 'bidan', 'perawat'].includes(emp.role(e));
+  /** Isian awal untuk tombol Tambah Dokter / Bidan / Perawat. */
+  emp.PRESETS = {
+    dokter: { label: 'Dokter', unit: 'KLINIK', position: 'Dokter Umum', department: 'Pelayanan Medis', payScheme: 'service_only', baseSalary: 0 },
+    bidan: { label: 'Bidan', unit: 'KLINIK', position: 'Bidan', department: 'Kebidanan', payScheme: 'monthly_service' },
+    perawat: { label: 'Perawat', unit: 'KLINIK', position: 'Perawat', department: 'Keperawatan', payScheme: 'monthly_service' }
+  };
   emp.primaryUnit = (e) => (e.unit === 'LINTAS' ? e.primaryUnit || 'APT' : e.unit);
   emp.positionsFor = (unit) => (unit === 'LINTAS' ? C.ALL_POSITIONS : C.POSITIONS[unit] || C.ALL_POSITIONS);
 
@@ -116,7 +122,8 @@
   /* ===================== Halaman ===================== */
   const state = { q: '', unit: '', position: '', status: '', view: 'table' };
 
-  async function render(view) {
+  async function render(view, params) {
+    params = params || {};
     const canEdit = NP.sec.can('employees.edit');
     try {
       state.view = localStorage.getItem('noura.empView') || 'table';
@@ -128,7 +135,9 @@
           ${canEdit ? `<button class="btn btn-ghost" data-act="template">${ui.icon('download')}<span>Template Impor</span></button>
           <button class="btn btn-ghost" data-act="import">${ui.icon('upload')}<span>Impor Excel</span></button>` : ''}
           <button class="btn btn-ghost" data-act="export">${ui.icon('excel')}<span>Ekspor Excel</span></button>
-          ${canEdit ? `<button class="btn btn-primary" data-act="add">${ui.icon('plus')}<span>Tambah Karyawan</span></button>` : ''}
+          ${canEdit ? `<button class="btn btn-ghost" data-act="add-dokter">${ui.icon('medical')}<span>Tambah Dokter</span></button>
+          <button class="btn btn-ghost" data-act="add-bidan">${ui.icon('medical')}<span>Tambah Bidan</span></button>
+          <button class="btn btn-primary" data-act="add">${ui.icon('plus')}<span>Tambah Karyawan</span></button>` : ''}
         </div>
       </div>
       <div class="stats-row" id="emp-stats"></div>
@@ -214,6 +223,8 @@
 
     stats();
     draw();
+    // tautan langsung, mis. #/employees?add=dokter (dari halaman impor bila dokter belum ada)
+    if (canEdit && emp.PRESETS[params.add]) openForm(null, reload, { preset: params.add });
 
     ui.$('#f-q', view).oninput = u.debounce((e) => {
       state.q = e.target.value;
@@ -250,6 +261,10 @@
       switch (a.dataset.act) {
         case 'add':
           openForm(null, reload);
+          break;
+        case 'add-dokter':
+        case 'add-bidan':
+          openForm(null, reload, { preset: a.dataset.act.slice(4) });
           break;
         case 'edit':
           openForm(list.find((x) => x.id === id), reload);
@@ -323,8 +338,10 @@
   }
 
   /* ---------- Form tambah/edit ---------- */
-  async function openForm(existing, onSaved) {
-    const e = existing ? u.clone(existing) : emp.blank();
+  async function openForm(existing, onSaved, opts) {
+    opts = opts || {};
+    const preset = !existing && emp.PRESETS[opts.preset];
+    const e = existing ? u.clone(existing) : Object.assign(emp.blank(), preset ? { unit: preset.unit, position: preset.position, department: preset.department, payScheme: preset.payScheme, baseSalary: preset.baseSalary || 0 } : {});
     e.payConfig = e.payConfig || {};
     e.costSplit = e.costSplit || { APT: 50 };
     e.componentOverrides = e.componentOverrides || {};
@@ -334,6 +351,7 @@
     body.className = 'emp-form';
     body.noValidate = true;
     body.innerHTML = `
+      ${preset ? `<div class="alert alert-info">${ui.icon('info')}<div>Jabatan <b>${u.esc(preset.position)}</b> di unit <b>${u.esc(C.EMP_UNITS[preset.unit])}</b> dan skema <b>${u.esc(C.PAY_SCHEMES[preset.payScheme].label)}</b> sudah diisi — ubah di tab <b>Pekerjaan &amp; Unit</b> / <b>Penggajian</b> bila perlu.${C.PAY_SCHEMES[preset.payScheme].useBase ? ' Isi <b>gaji pokok</b> di tab <b>Penggajian</b>.' : ''} No. STR &amp; SIP diisi di tab <b>Tenaga Kesehatan</b>.</div></div>` : ''}
       <div class="tabs-host"></div>
       <section data-pane="pribadi">
         <div class="photo-row">
@@ -493,7 +511,7 @@
     });
 
     ui.modal({
-      title: existing ? 'Edit Karyawan — ' + existing.name : 'Tambah Karyawan',
+      title: existing ? 'Edit Karyawan — ' + existing.name : preset ? 'Tambah ' + preset.label : 'Tambah Karyawan',
       size: 'lg',
       body,
       static: true,

@@ -46,7 +46,7 @@
         { min: 125, amount: 750000 }
       ]
     },
-    slip: { showServiceDetail: true, showEmployerContrib: false, showTerbilang: true, showBank: true, footerNote: 'Slip gaji ini diterbitkan oleh sistem dan bersifat rahasia.', issuerName: 'Administrator' },
+    slip: { showServiceDetail: true, showEmployerContrib: false, showTerbilang: true, showBank: true, footerNote: 'Slip gaji ini diterbitkan oleh sistem dan bersifat rahasia.', issuerName: 'Administrator', stampEnabled: true, stampLabel: 'DISAHKAN', stampColor: '#006b2a' },
     numbering: { employee: 'KRY', service: 'TND', transaction: 'TRX', payroll: 'PAY', slip: 'SLIP' },
     backup: { reminderDays: 7, lastBackup: null },
     security: { autoLockMinutes: 30 },

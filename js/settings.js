@@ -275,8 +275,16 @@
         <label class="check"><input type="checkbox" name="showBank" ${s.showBank ? 'checked' : ''}><span>Tampilkan bank & rekening (tersamar)</span></label>
         <label class="check"><input type="checkbox" name="showEmployerContrib" ${s.showEmployerContrib ? 'checked' : ''}><span>Tampilkan iuran BPJS pemberi kerja</span></label>
         <label class="field"><span>Nama pembuat (footer slip)</span><input name="issuerName" value="${u.esc(s.issuerName)}"></label>
-        <label class="field"><span>Catatan kaki slip</span><input name="footerNote" value="${u.esc(s.footerNote)}" maxlength="120"></label>
+        <label class="field span-2"><span>Catatan kaki slip</span><input name="footerNote" value="${u.esc(s.footerNote)}" maxlength="120"></label>
       </div>
+      <fieldset class="panel"><legend>Cap digital pengesahan</legend>
+        <label class="check"><input type="checkbox" name="stampEnabled" ${s.stampEnabled !== false ? 'checked' : ''}><span>Bubuhkan cap digital pada slip yang sudah disetujui (tanggal &amp; jam pengesahan + kode verifikasi)</span></label>
+        <div class="grid-2">
+          <label class="field"><span>Tulisan cap</span><input name="stampLabel" value="${u.esc(s.stampLabel || 'DISAHKAN')}" maxlength="14"></label>
+          <label class="field"><span>Warna cap</span><select name="stampColor">${ui.options([['#006b2a', 'Hijau (warna Apotek Noura)'], ['#1d4ed8', 'Biru'], ['#b91c1c', 'Merah'], ['#6d28d9', 'Ungu']], s.stampColor || '#006b2a')}</select></label>
+        </div>
+        <p class="muted small">Waktu pada cap adalah saat penggajian <b>disetujui</b> (WIB). Slip draft tidak diberi cap. Keaslian slip dapat dicek lewat tombol <b>Verifikasi kode</b> di halaman Slip Gaji.</p>
+      </fieldset>
       <p class="muted small">Kop slip otomatis memakai logo & identitas unit karyawan (Apotek Noura atau Praktek Dokter Umum). Tanda tangan pimpinan diambil dari tab Identitas. Data STR/SIP tidak pernah ditampilkan pada slip.</p>
       <div class="form-actions"><button type="button" class="btn btn-ghost" data-prev>${ui.icon('eye')}<span>Preview contoh</span></button><button class="btn btn-primary" type="submit">${ui.icon('check')}<span>Simpan</span></button></div></form>`;
     const f = el.querySelector('form');

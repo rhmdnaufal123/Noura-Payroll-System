@@ -49,6 +49,11 @@
 .slip .s-sign .line{margin-top:62px;border-top:1px solid #374151;padding-top:4px;font-weight:600}
 .slip .s-sign small{display:block;color:#6b7280}
 .slip .s-foot{margin-top:22px;padding-top:8px;border-top:1px dashed #d1d5db;display:flex;justify-content:space-between;font-size:10px;color:#6b7280}
+.slip .s-sign>div{position:relative}
+.slip .s-stamp{position:absolute;left:98px;top:34px;width:128px;height:128px;opacity:.92;pointer-events:none}
+.slip .s-sign.stamped .line{margin-top:132px}
+.slip .s-sah{margin-top:10px;font-size:10px;color:#374151}
+.slip .s-sah b{font-weight:700}
 .slip .s-wm{position:absolute;top:42%;left:0;right:0;text-align:center;font-size:120px;font-weight:800;color:rgba(239,68,68,.10);transform:rotate(-24deg);pointer-events:none;letter-spacing:12px}
 `;
 
@@ -78,6 +83,64 @@
     return h || '<tr><td colspan="2"><small>Tidak ada</small></td></tr>';
   }
 
+  /* ---------- Cap digital pengesahan ---------- */
+  function fnv1a(str) {
+    let h = 0x811c9dc5;
+    for (const ch of String(str)) {
+      h ^= ch.codePointAt(0);
+      h = Math.imul(h, 0x01000193) >>> 0;
+    }
+    return h >>> 0;
+  }
+  const jkt = (ts, o) => new Intl.DateTimeFormat('id-ID', Object.assign({ timeZone: 'Asia/Jakarta' }, o)).format(new Date(ts));
+  /** Waktu pengesahan slip (saat penggajian disetujui). Draft tidak memiliki pengesahan. */
+  function approvalTs(run, s) {
+    if (!run || run.status === 'draft') return null;
+    return s.issuedAt || run.approvedAt || run.lockedAt || null;
+  }
+  /** Kode verifikasi: sidik jari nomor slip, karyawan, periode, gaji bersih, dan waktu pengesahan. */
+  function verifyCode(run, s) {
+    const ts = approvalTs(run, s);
+    if (!ts || !s.slipNo) return null;
+    const h = fnv1a([s.slipNo, s.employeeId || s.employee.id, run.period, s.totals.net, Math.floor(ts / 1000)].join('|')).toString(16).toUpperCase().padStart(8, '0');
+    return h.slice(0, 4) + '-' + h.slice(4);
+  }
+  function stampInfo(run, s) {
+    const ts = approvalTs(run, s);
+    if (!ts) return null;
+    return {
+      ts, code: verifyCode(run, s), by: run.approvedBy && run.approvedBy !== '-' ? run.approvedBy : '',
+      date: jkt(ts, { day: '2-digit', month: 'short', year: 'numeric' }).replace(/\./g, '').toUpperCase(),
+      time: jkt(ts, { hour: '2-digit', minute: '2-digit', hour12: false }).replace(':', '.') + ' WIB',
+      long: jkt(ts, { day: 'numeric', month: 'long', year: 'numeric' }) + ' pukul ' + jkt(ts, { hour: '2-digit', minute: '2-digit', hour12: false }).replace(':', '.') + ' WIB'
+    };
+  }
+  let stampSeq = 0;
+  /** SVG cap bulat: nama unit melingkar di atas, keterangan di bawah, tengah: label, tanggal, jam, kode. */
+  function stampSvg(info, unitName, cfg) {
+    const id = 'st' + ++stampSeq;
+    const color = /^#[0-9a-f]{6}$/i.test(cfg.stampColor || '') ? cfg.stampColor : '#006b2a';
+    const label = String(cfg.stampLabel || 'DISAHKAN').toUpperCase().slice(0, 14);
+    const top = String(unitName || '').toUpperCase().slice(0, 34);
+    const topFs = Math.min(13, Math.max(8.5, 190 / Math.max(1, top.length * 0.72)));
+    const labFs = Math.min(18, 118 / Math.max(1, label.length * 0.68));
+    const svg = `<svg width="256" height="256" viewBox="0 0 200 200" xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink">
+      <defs><path id="${id}t" d="M 32 100 A 68 68 0 0 1 168 100"/><path id="${id}b" d="M 24 100 A 76 76 0 0 0 176 100"/></defs>
+      <g transform="rotate(-10 100 100)"><g fill="none" stroke="${color}"><circle cx="100" cy="100" r="95" stroke-width="4"/><circle cx="100" cy="100" r="87" stroke-width="1.4"/><circle cx="100" cy="100" r="57" stroke-width="1.4"/></g>
+      <g fill="${color}" font-family="Arial, Helvetica, sans-serif" font-weight="700" text-anchor="middle">
+        <text font-size="${topFs.toFixed(1)}" letter-spacing="1"><textPath href="#${id}t" xlink:href="#${id}t" startOffset="50%">${u.esc(top)}</textPath></text>
+        <text font-size="10.5" letter-spacing="2"><textPath href="#${id}b" xlink:href="#${id}b" startOffset="50%">★ PENGESAHAN SLIP GAJI ★</textPath></text>
+        <text x="100" y="${(86).toFixed(0)}" font-size="${labFs.toFixed(1)}" letter-spacing="1">${u.esc(label)}</text>
+        <rect x="58" y="92" width="84" height="1.4"/>
+        <text x="100" y="109" font-size="13">${u.esc(info.date)}</text>
+        <text x="100" y="125" font-size="13">${u.esc(info.time)}</text>
+        ${info.code ? `<text x="100" y="140" font-size="8.5" font-weight="600" letter-spacing=".5">${u.esc(info.code)}</text>` : ''}
+      </g></g></svg>`;
+    // Disematkan sebagai gambar: tampil sama di layar, cetak, HTML, serta PDF/PNG (html2canvas).
+    const b64 = typeof btoa === 'function' ? btoa(unescape(encodeURIComponent(svg))) : Buffer.from(svg, 'utf8').toString('base64');
+    return `<img class="s-stamp" src="data:image/svg+xml;base64,${b64}" width="128" height="128" alt="Cap digital ${u.esc(label)} ${u.esc(info.date)} ${u.esc(info.time)}${info.code ? ' kode ' + u.esc(info.code) : ''}">`;
+  }
+
   /** HTML slip gaji. */
   function slipHtml(run, s, opts) {
     opts = opts || {};
@@ -88,6 +151,7 @@
     const inp = s.inputs || {};
     const D = NP.defaults;
     const showDetail = cfg.showServiceDetail !== false;
+    const sah = cfg.stampEnabled === false ? null : stampInfo(run, s);
     return `<div class="slip">
       ${opts.draft || run.status === 'draft' ? '<div class="s-wm">DRAFT</div>' : ''}
       <div class="s-head">
@@ -124,10 +188,11 @@
       <div class="s-att"><span>Hari kerja: <b>${u.num(inp.workDays)}</b></span><span>Hadir: <b>${u.num(inp.presentDays)}</b></span><span>Tidak hadir: <b>${u.num(inp.absentDays)}</b></span><span>Terlambat: <b>${u.num(inp.lateCount)}×</b></span>${inp.overtimeHours ? `<span>Lembur: <b>${u.num(inp.overtimeHours, 1)} jam</b></span>` : ''}${inp.shifts ? `<span>Shift: <b>${u.num(inp.shifts)}</b></span>` : ''}${inp.sessions ? `<span>Sesi praktik: <b>${u.num(inp.sessions)}</b></span>` : ''}${s.serviceQty ? `<span>Tindakan: <b>${u.num(s.serviceQty)}</b></span>` : ''}</div>
       ${cfg.showEmployerContrib && s.employer && s.employer.total ? `<div class="s-note">Iuran BPJS ditanggung pemberi kerja (tidak mengurangi gaji): ${u.rp(s.employer.total)}</div>` : ''}
       ${inp.slipNote ? `<div class="s-note">Catatan: ${u.esc(inp.slipNote)}</div>` : ''}
-      <div class="s-sign">
-        <div><small>Mengetahui,</small><small>${u.esc(unit.leaderTitle || 'Pimpinan')}</small><div class="line">${u.esc(unit.leaderName || '(.............................)')}</div></div>
+      <div class="s-sign ${sah ? 'stamped' : ''}">
+        <div><small>Mengetahui,</small><small>${u.esc(unit.leaderTitle || 'Pimpinan')}</small>${sah ? stampSvg(sah, unit.name, cfg) : ''}<div class="line">${u.esc(unit.leaderName || '(.............................)')}</div></div>
         <div><small>Diterima oleh,</small><small>Karyawan</small><div class="line">${u.esc(s.employee.name)}</div></div>
       </div>
+      ${sah ? `<div class="s-sah">Disahkan secara digital pada <b>${u.esc(sah.long)}</b>${sah.by ? ' oleh <b>' + u.esc(sah.by) + '</b>' : ''}${sah.code ? ' · Kode verifikasi <b>' + u.esc(sah.code) + '</b>' : ''}</div>` : ''}
       <div class="s-foot"><span>Diterbitkan: ${u.fmtDate(u.todayISO(new Date(s.issuedAt || run.approvedAt || Date.now())), 'long')} · Dibuat oleh: ${u.esc(cfg.issuerName || 'Administrator')}</span><span>${u.esc(cfg.footerNote || '')}</span></div>
     </div>`;
   }
@@ -141,9 +206,23 @@
     return NP.exp.toCanvas(slipHtml(run, s, opts), 794);
   }
 
+  /** Cari slip berdasarkan kode verifikasi (hanya slip yang sudah disahkan). */
+  async function findByCode(code) {
+    const want = String(code || '').toUpperCase().replace(/[^0-9A-F]/g, '');
+    if (want.length !== 8) return null;
+    for (const run of await NP.payroll.runs()) for (const s of run.slips) {
+      const c = verifyCode(run, s);
+      if (c && c.replace('-', '') === want) return { run, s, info: stampInfo(run, s) };
+    }
+    return null;
+  }
+
   const slip = {
     css: SLIP_CSS,
     html: slipHtml,
+    verifyCode,
+    stampInfo,
+    findByCode,
     async pdfBlob(run, s, opts) {
       return NP.exp.canvasToPdfBlob(await toCanvas(run, s, opts));
     },
@@ -254,6 +333,7 @@
           <div class="btn-group">
             <button class="btn btn-ghost" data-act="printall">${ui.icon('print')}<span>Cetak semua</span></button>
             <button class="btn btn-ghost" data-act="zip">${ui.icon('zip')}<span>Download ZIP</span></button>
+            <button class="btn btn-ghost" data-act="verify">${ui.icon('check')}<span>Verifikasi kode</span></button>
           </div>
         </div>
         <div class="slip-layout">
@@ -309,7 +389,29 @@
       if (a.dataset.act === 'print') slip.print(run, s);
       if (a.dataset.act === 'printall') slip.printAll(run);
       if (a.dataset.act === 'zip') slip.zipAll(run);
+      if (a.dataset.act === 'verify') verifyFlow();
     });
+    async function verifyFlow() {
+      const code = await ui.prompt({ title: 'Verifikasi Slip Gaji', label: 'Kode verifikasi pada cap digital (mis. 7F3A-91C2)', required: true, minLength: 8, okLabel: 'Periksa', requiredMsg: 'Masukkan 8 karakter kode verifikasi.' });
+      if (!code) return;
+      const hit = await findByCode(code);
+      if (!hit) {
+        await ui.confirm({ title: 'Kode tidak dikenal', html: `<b>${u.esc(code.toUpperCase())}</b> tidak cocok dengan slip mana pun yang sudah disahkan. Slip mungkin palsu, sudah diubah, atau penggajiannya dikembalikan ke draft.`, okLabel: 'Tutup', danger: true });
+        return;
+      }
+      const { s, info } = hit;
+      const ok = await ui.confirm({
+        title: 'Slip sah',
+        html: `<b>${u.esc(s.employee.name)}</b> — ${u.esc(u.periodLabel(hit.run.period))}<br>No. slip <b>${u.esc(s.slipNo)}</b> · gaji bersih <b>${u.rp(s.totals.net)}</b><br>Disahkan ${u.esc(info.long)}${info.by ? ' oleh ' + u.esc(info.by) : ''}.`,
+        okLabel: 'Tampilkan slip'
+      });
+      if (ok) {
+        run = runs.find((r) => r.id === hit.run.id) || run;
+        ui.$('#sl-run', view).value = run.id;
+        current = s.employeeId;
+        drawList();
+      }
+    }
   }
 
   NP.slip = slip;
