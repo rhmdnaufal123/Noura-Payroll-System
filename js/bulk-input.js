@@ -605,7 +605,7 @@
     host.innerHTML = `
       <div class="card">
         <div class="card-head"><h3>1. Aturan jasa bidan homecare</h3></div>
-        <p class="muted small">Bidan pelaksana mendapat nominal tetap <b>sekali per kunjungan</b> (satu struk/transaksi) yang berisi tindakan homecare, berapa pun jumlah tindakannya. Nominal dapat diatur <b>satu per satu</b> untuk setiap tindakan; bila satu kunjungan berisi beberapa tindakan, yang dipakai nominal tindakan pertama pada struk. Sisa harga masuk ke unit. Tindakan yang seluruhnya untuk dokter — mis. <b>Pemeriksaan Dokter Umum HC</b> Rp300.000 — tidak diubah. Aturan disimpan di Master Tindakan, sehingga impor file POS berikutnya otomatis mengikutinya.</p>
+        <p class="muted small">Jasa bidan homecare dihitung <b>sekali per transaksi</b> (satu struk/kunjungan) yang berisi tindakan homecare, berapa pun jumlah tindakannya. Nominalnya dapat diatur <b>satu per satu</b> untuk setiap tindakan di kolom <b>Jasa bidan / kunjungan</b>; bila satu transaksi berisi beberapa tindakan homecare, bidan tetap dibayar sekali sesuai nominal tindakan pertama pada struk. Sisa harga masuk ke unit. Tindakan yang seluruhnya untuk dokter — mis. <b>Pemeriksaan Dokter Umum HC</b> Rp300.000 — tidak diubah. Aturan disimpan di Master Tindakan, sehingga impor file POS berikutnya otomatis mengikutinya.</p>
         <div class="grid-3">
           <label class="field"><span>Isi semua tindakan dengan</span><div class="input-prefix"><span>Rp</span><input id="hc-nominal" data-money inputmode="numeric" value="${ui.moneyVal(nominal)}"></div><small class="muted">Ubah nominal per tindakan di kolom <b>Jasa bidan / kunjungan</b>.</small></label>
         </div>
