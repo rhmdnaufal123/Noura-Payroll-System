@@ -811,6 +811,14 @@ async function step(name, fn) {
       await page.waitForSelector('[data-act=create-master]', { state: 'detached' });
     }
     await setDefaults();
+    // halaman pratinjau tetap sama saat pratinjau digambar ulang (mis. klik label dengan/tanpa dokter)
+    await page.click('#pos-table [data-pg=next]');
+    await page.waitForFunction(() => /^2\//.test(document.querySelector('#pos-table .pg-num').textContent));
+    await page.uncheck('.pos-cats input[data-cat="HOMECARE"]');
+    await page.waitForFunction(() => { const c = document.querySelector('.pos-cats input[data-cat="HOMECARE"]'); return c && !c.checked; });
+    await page.check('.pos-cats input[data-cat="HOMECARE"]');
+    await page.waitForFunction(() => { const c = document.querySelector('.pos-cats input[data-cat="HOMECARE"]'); return c && c.checked; });
+    assert.ok(/^2\//.test(await page.locator('#pos-table .pg-num').innerText()), 'halaman pratinjau kembali ke awal');
     const btn = page.locator('[data-act=import]');
     assert.ok(await btn.isEnabled(), await page.locator('#pos-body').innerText());
     assert.ok(new RegExp('Impor ' + FX.expect.transactions + ' transaksi').test(await btn.innerText()));
@@ -847,6 +855,40 @@ async function step(name, fn) {
     assert.ok(/^analisis-tindakan-.*\.xlsx$/.test(x.name), x.name);
     await page.fill('#an-q', '');
     await page.click('.seg-btn[data-group=ALL]');
+  });
+  await step('jasa bidan homecare: aturan Rp100.000 per kunjungan disimpan & diterapkan ke transaksi bulan itu', async () => {
+    await go('bulk?tab=homecare&month=' + prevMonth);
+    await page.waitForSelector('.hc-svc');
+    const st = await page.locator('.hc-svc tbody tr').evaluateAll((trs) => trs.map((tr) => [tr.querySelector('td:nth-child(2) b').textContent.toUpperCase(), tr.querySelector('.flag').textContent]));
+    const byName = Object.fromEntries(st);
+    assert.ok(/Khusus dokter/.test(byName['PEMERIKSAAN DOKTER UMUM HC']), JSON.stringify(st));
+    assert.ok(/Akan diubah/.test(byName['INFUS MULTIVITAMIN HC']) && /Akan diubah/.test(byName['PAKET PEMERIKSAAN HC']), JSON.stringify(st));
+    await newToast(async () => {
+      await page.click('[data-hc=save-rule]');
+      await modalBtn('Simpan aturan').click();
+    }, /per kunjungan disimpan/);
+    await page.waitForFunction(() => /Aturan sudah tersimpan/.test(document.querySelector('[data-hc=save-rule]').textContent));
+    const rule = await ev(async () => (await NP.svc.all()).filter((s) => /^infus multivitamin hc$/i.test(s.name)).map((s) => s.shares.filter((x) => x.type === 'role')));
+    assert.deepStrictEqual(rule[0], [{ type: 'role', target: 'bidan', mode: 'nominal', value: 100000, perVisit: true }]);
+    const before = await ev(async (m) => (await NP.db.all('transactions')).filter((t) => t.date.startsWith(m) && t.status === 'active').reduce((a, t) => a + t.totals.gross, 0), prevMonth);
+    const bid = await page.locator('#hc-bidan option').nth(1).getAttribute('value');
+    await page.selectOption('#hc-bidan', bid);
+    await page.waitForFunction(() => { const b = document.querySelector('[data-hc=apply]'); return b && !b.disabled; });
+    const n = +(/\((\d+)\)/.exec(await page.locator('[data-hc=apply]').innerText()) || [0, 0])[1];
+    assert.ok(n >= 3, 'kunjungan yang diterapkan: ' + n);
+    await newToast(async () => {
+      await page.click('[data-hc=apply]');
+      await modalBtn('Terapkan').click();
+    }, /kunjungan homecare diperbarui/);
+    const r = await ev(async ([m, bid]) => {
+      const ts = (await NP.db.all('transactions')).filter((t) => t.date.startsWith(m) && t.status === 'active');
+      const services = await NP.svc.all();
+      const V = NP.hc.visits(ts, services, { nominal: 100000 });
+      return { gross: ts.reduce((a, t) => a + t.totals.gross, 0), st: V.map((v) => v.status), amt: V.filter((v) => v.status === 'ok').map((v) => v.bidanAmount), bid: V.filter((v) => v.status === 'ok').every((v) => v.bidanId === bid) };
+    }, [prevMonth, bid]);
+    assert.strictEqual(r.gross, before, 'pendapatan kotor tidak berubah');
+    assert.ok(r.st.every((x) => x !== 'fix') && r.amt.length >= n && r.amt.every((a) => a === 100000) && r.bid, JSON.stringify(r));
+    assert.ok(/Perlu diterapkan\s*0/.test(await page.locator('#bk-body .stats-row').innerText()));
   });
   await step('impor biaya dokter dari file resep: pilih dokter, tandai pasien sama & service < Rp100.000', async () => {
     const XLSX = require(path.join(ROOT, 'vendor', 'xlsx.full.min.js'));

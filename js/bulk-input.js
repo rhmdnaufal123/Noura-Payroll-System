@@ -4,6 +4,8 @@
  *     persis seperti Input Tindakan harian.
  *  2. Impor file POS: file ekspor penjualan apotek (sheet "Penjualan"). Setiap struk berisi tindakan
  *     menjadi satu transaksi bernomor referensi POS:<kode struk>; struk yang sudah pernah diimpor dilewati.
+ *  3. Impor biaya dokter dari file penebusan resep.
+ *  4. Jasa bidan homecare: nominal tetap per kunjungan (aturan Master Tindakan + terapkan ke transaksi).
  * Semua transaksi disimpan sekaligus dalam satu transaksi database (Supabase).
  */
 (function (root) {
@@ -89,7 +91,7 @@
       <div id="bk-tabs"></div>
       <div id="bk-body"></div>`;
     const body = ui.$('#bk-body', view);
-    ui.tabs(ui.$('#bk-tabs', view), [{ key: 'grid', label: 'Tabel bulanan', icon: 'calendar' }, { key: 'pos', label: 'Impor file POS', icon: 'upload' }, { key: 'resep', label: 'Impor biaya dokter (resep)', icon: 'medical' }], st.tab, (k) => {
+    ui.tabs(ui.$('#bk-tabs', view), [{ key: 'grid', label: 'Tabel bulanan', icon: 'calendar' }, { key: 'pos', label: 'Impor file POS', icon: 'upload' }, { key: 'resep', label: 'Impor biaya dokter (resep)', icon: 'medical' }, { key: 'homecare', label: 'Jasa bidan homecare', icon: 'users' }], st.tab, (k) => {
       st.tab = k;
       draw();
     });
@@ -97,6 +99,7 @@
       body.innerHTML = '<div class="loading"><div class="spinner"></div></div>';
       if (st.tab === 'pos') await renderPos(body);
       else if (st.tab === 'resep') await renderResep(body);
+      else if (st.tab === 'homecare') await renderHc(body);
       else await renderGrid(body);
     }
     await draw();
@@ -349,7 +352,7 @@
   }
 
   /* ===================== Impor file POS ===================== */
-  const pos = { file: null, parsed: null, cats: null, defaults: {}, doctorMode: 'exam', wdOverride: new Map() };
+  const pos = { file: null, parsed: null, cats: null, defaults: {}, doctorMode: 'exam', wdOverride: new Map(), tbl: {} };
 
   /** Pilih & baca file penjualan kasir (dipakai tab Impor POS dan pembanding di tab resep). */
   async function pickKasirFile() {
@@ -361,6 +364,7 @@
     pos.parsed = parsed;
     pos.cats = new Set(NP.pos.categorySummary(parsed.lines).filter((c) => c.service).map((c) => c.category));
     pos.wdOverride = new Map();
+    pos.tbl = {};
     return true;
   }
 
@@ -478,6 +482,7 @@
       rows: P.transactions,
       sortKey: 'date',
       pageSize: 15,
+      state: pos.tbl, // halaman pratinjau tetap sama saat label dengan/tanpa dokter diklik
       cards: true,
       empty: 'Tidak ada tindakan pada kategori yang dipilih.'
     });
@@ -551,6 +556,180 @@
     });
   }
 
+
+  /* ===================== Jasa bidan homecare per kunjungan ===================== */
+  const hcs = { nominal: NP.hc ? NP.hc.DEFAULT_NOMINAL : 100000, skip: new Set(), force: new Set(), bidan: '', perRow: new Map(), unsel: new Set(), tbl: {} };
+  const HC_STATUS = {
+    ok: ['Sudah sesuai', 'flag-done'],
+    change: ['Akan diubah', 'flag-dup'],
+    doctor: ['Khusus dokter — tidak diubah', 'flag-db'],
+    short: ['Tidak dapat diterapkan', 'flag-zero']
+  };
+
+  async function renderHc(outer) {
+    const [services, employees, trxs] = await Promise.all([NP.svc.all(), NP.emp.all(), NP.trx.all()]);
+    const host = freshHost(outer);
+    const canMaster = NP.sec.can('services.edit');
+    const canEdit = NP.sec.can('trx.editAny');
+    const empMap = new Map(employees.map((e) => [e.id, e]));
+    const bidans = staffFor(employees, 'bidan');
+    const nominal = hcs.nominal;
+    const rerender = async () => {
+      const y = window.scrollY;
+      await renderHc(outer);
+      window.scrollTo(0, y);
+    };
+    const hcSvc = services.filter((s) => s.active !== false && NP.hc.isHomecare(s));
+    const plans = hcSvc.map((s) => NP.hc.planService(s, nominal));
+    const picked = (p) => (p.status === 'change' && !hcs.skip.has(p.service.id)) || (p.status === 'doctor' && hcs.force.has(p.service.id));
+    const toSave = plans.filter(picked);
+    const range = u.monthRange(st.period);
+    const V = NP.hc.visits(trxs, services, { start: range.start, end: range.end, nominal });
+    const bidanOf = (v) => hcs.perRow.get(v.t.id) || v.bidanId || hcs.bidan || '';
+    const editState = (v) => {
+      try {
+        if (NP.trx.checkEditable(v.t).locked) return 'periode gaji terkunci';
+      } catch (e) {
+        return 'penggajian sudah disetujui';
+      }
+      return '';
+    };
+    const rows = V.map((v) => Object.assign(v, { lock: v.status === 'fix' ? editState(v) : '' }));
+    const fixable = rows.filter((v) => v.status === 'fix' && !v.lock);
+    const chosen = fixable.filter((v) => !hcs.unsel.has(v.t.id));
+    const missingBidan = chosen.filter((v) => !bidanOf(v));
+    const totBidan = u.sum(rows, (v) => v.bidanAmount);
+
+    host.innerHTML = `
+      <div class="card">
+        <div class="card-head"><h3>1. Aturan jasa bidan homecare</h3></div>
+        <p class="muted small">Bidan pelaksana mendapat nominal tetap <b>sekali per kunjungan</b> (satu struk/transaksi) yang berisi tindakan homecare, berapa pun jumlah tindakannya. Sisa harga masuk ke unit. Tindakan yang seluruhnya untuk dokter — mis. <b>Pemeriksaan Dokter Umum HC</b> Rp300.000 — tidak diubah. Aturan disimpan di Master Tindakan, sehingga impor file POS berikutnya otomatis mengikutinya.</p>
+        <div class="grid-3">
+          <label class="field"><span>Jasa bidan per kunjungan</span><div class="input-prefix"><span>Rp</span><input id="hc-nominal" data-money inputmode="numeric" value="${ui.moneyVal(nominal)}"></div></label>
+        </div>
+        ${hcSvc.length ? `<div class="table-wrap table-cards"><table class="tbl hc-svc"><thead><tr><th><span class="sr-only">Pilih</span></th><th>Tindakan homecare</th><th class="ta-right">Harga</th><th>Pembagian sekarang</th><th>Status</th></tr></thead><tbody>${plans
+          .map((p) => {
+            const s = p.service;
+            const can = p.status === 'change' || p.status === 'doctor';
+            const st2 = HC_STATUS[p.status];
+            return `<tr data-hcs="${u.esc(s.id)}"><td data-label="Pilih"><input type="checkbox" data-hcpick="${u.esc(s.id)}" ${picked(p) || p.status === 'ok' ? 'checked' : ''} ${can && canMaster ? '' : 'disabled'} aria-label="Terapkan pada ${u.esc(s.name)}"></td>
+              <td data-label="Tindakan"><b>${u.esc(s.name)}</b><small class="block muted">${u.esc(s.code || '')} · ${u.esc(s.category || '')}</small></td>
+              <td data-label="Harga" class="ta-right">${u.rp(s.price)}</td>
+              <td data-label="Pembagian sekarang"><div class="share-chips">${NP.svc.shareSummary(s, empMap)}</div></td>
+              <td data-label="Status"><span class="flag ${st2[1]}">${st2[0]}</span>${p.status === 'short' || (p.status === 'doctor' && hcs.force.has(s.id) && p.errors.length) ? `<small class="block muted">${u.esc(p.errors.join(' '))}</small>` : ''}${p.status === 'change' || (p.status === 'doctor' && hcs.force.has(s.id)) ? `<small class="block muted">Menjadi: Bidan pelaksana ${u.rp(nominal)} per kunjungan</small>` : ''}</td></tr>`;
+          })
+          .join('')}</tbody></table></div>
+        <div class="form-actions">${canMaster ? `<button type="button" class="btn btn-primary" data-hc="save-rule" ${toSave.length && !toSave.some((p) => p.errors.length) ? '' : 'disabled'}>${ui.icon('check')}<span>${toSave.length ? 'Simpan aturan ke ' + toSave.length + ' tindakan' : 'Aturan sudah tersimpan'}</span></button>` : '<small class="muted">Hanya Administrator yang dapat mengubah Master Tindakan.</small>'}</div>`
+          : ui.empty('Belum ada tindakan berkategori <b>Homecare</b> di Master Tindakan. Impor file POS (tab Impor file POS) untuk menambahkannya, atau tambahkan di Master Tindakan.', 'medical')}
+      </div>
+      <div class="card">
+        <div class="card-head"><h3>2. Kunjungan homecare yang sudah tercatat</h3>
+          <label class="field-inline">Bulan <input type="month" id="hc-month" value="${st.period}" max="${u.todayISO().slice(0, 7)}"></label></div>
+        <p class="muted small">Transaksi homecare yang diimpor sebelum aturan di atas disimpan belum mendapat jasa bidan per kunjungan. Pilih bidan lalu terapkan — hanya tindakan homecare yang dihitung ulang; tindakan lain pada struk yang sama tidak berubah. Transaksi pada periode gaji yang sudah disetujui/terkunci dilewati.</p>
+        <div class="stats-row">
+          ${ui.stat('Kunjungan homecare', u.num(rows.length), { icon: 'users', sub: u.periodLabel(st.period) })}
+          ${ui.stat('Sudah sesuai', u.num(rows.filter((v) => v.status === 'ok').length), { icon: 'check' })}
+          ${ui.stat('Perlu diterapkan', u.num(fixable.length), { icon: 'warn', sub: rows.filter((v) => v.lock).length ? rows.filter((v) => v.lock).length + ' terkunci (dilewati)' : '' })}
+          ${ui.stat('Jasa bidan homecare', u.rp(totBidan), { icon: 'wallet', sub: fixable.length ? 'setelah diterapkan ' + u.rp(totBidan - u.sum(chosen, (v) => v.bidanAmount) + chosen.length * nominal) : '' })}
+        </div>
+        <div class="grid-3">
+          <label class="field"><span>Bidan pelaksana default</span><select id="hc-bidan">${ui.options(bidans.map((e) => [e.id, e.name]), hcs.bidan, '— pilih bidan —')}</select>${!bidans.length && NP.sec.can('employees.edit') ? '<a class="small" href="#/employees?add=bidan">+ Tambah bidan di Data Karyawan</a>' : ''}</label>
+        </div>
+        <div id="hc-table"></div>
+        <div class="form-actions">
+          ${canEdit ? `<button type="button" class="btn btn-primary" data-hc="apply" ${chosen.length && !missingBidan.length ? '' : 'disabled'}>${ui.icon('check')}<span>Terapkan ${u.rp(nominal)} per kunjungan${chosen.length ? ' (' + u.num(chosen.length) + ')' : ''}</span></button>` : '<small class="muted">Hanya Administrator / Keuangan yang dapat mengubah transaksi.</small>'}
+        </div>
+        ${missingBidan.length ? `<p class="muted small ta-right">${u.num(missingBidan.length)} kunjungan belum memiliki bidan — pilih bidan default atau per baris.</p>` : ''}
+      </div>`;
+
+    ui.table(ui.$('#hc-table', host), {
+      columns: [
+        { key: 'pick', label: '<span class="sr-only">Pilih</span>', sortable: false, render: (v) => `<input type="checkbox" data-hcv="${u.esc(v.t.id)}" ${v.status === 'fix' && !v.lock && !hcs.unsel.has(v.t.id) ? 'checked' : ''} ${v.status === 'fix' && !v.lock ? '' : 'disabled'} aria-label="Pilih ${u.esc(v.t.id)}">` },
+        { key: 'date', label: 'Tanggal', value: (v) => v.t.date, render: (v) => u.fmtDate(v.t.date) },
+        { key: 'patient', label: 'Pasien / struk', value: (v) => v.t.patient || '', render: (v) => `${u.esc(v.t.patient || '-')}<small class="block muted">${u.esc((v.t.externalRef || v.t.id).replace(/^POS:/, ''))}</small>` },
+        { key: 'items', label: 'Tindakan homecare', sortable: false, render: (v) => v.hcItems.map((i) => u.esc(i.serviceName) + (i.qty > 1 ? ' ×' + i.qty : '')).join('<br>') },
+        { key: 'bidan', label: 'Bidan', sortable: false, render: (v) => (v.status === 'fix' && !v.lock ? `<select data-hcb="${u.esc(v.t.id)}" aria-label="Bidan ${u.esc(v.t.id)}">${ui.options(bidans.map((e) => [e.id, e.name]), bidanOf(v), '— pilih bidan —')}</select>` : u.esc((empMap.get(v.bidanId) || {}).name || '-')) },
+        { key: 'status', label: 'Jasa bidan', value: (v) => v.bidanAmount, render: (v) => `<b>${u.rp(v.bidanAmount)}</b><br>` + (v.status === 'ok' ? '<span class="flag flag-done">Sudah sesuai</span>' : v.status === 'norule' ? '<span class="flag flag-db">Tanpa jasa bidan</span><small class="block muted">tindakan belum memakai aturan</small>' : v.lock ? `<span class="flag flag-zero">Dilewati: ${u.esc(v.lock)}</span>` : `<span class="flag flag-low">Perlu diterapkan</span>`) }
+      ],
+      rows,
+      sortKey: 'date',
+      pageSize: 25,
+      state: hcs.tbl,
+      cards: true,
+      empty: 'Tidak ada transaksi homecare pada bulan ini.'
+    });
+
+    host.addEventListener('change', async (e) => {
+      const t = e.target;
+      if (t.id === 'hc-nominal') {
+        hcs.nominal = u.toInt(t.value);
+        return rerender();
+      }
+      if (t.id === 'hc-month') {
+        if (/^\d{4}-\d{2}$/.test(t.value)) st.period = t.value;
+        hcs.tbl.page = 1;
+        return rerender();
+      }
+      if (t.id === 'hc-bidan') {
+        hcs.bidan = t.value;
+        return rerender();
+      }
+      if (t.dataset.hcpick) {
+        const p = plans.find((x) => x.service.id === t.dataset.hcpick);
+        if (p.status === 'doctor') t.checked ? hcs.force.add(p.service.id) : hcs.force.delete(p.service.id);
+        else t.checked ? hcs.skip.delete(p.service.id) : hcs.skip.add(p.service.id);
+        return rerender();
+      }
+      if (t.dataset.hcv) {
+        t.checked ? hcs.unsel.delete(t.dataset.hcv) : hcs.unsel.add(t.dataset.hcv);
+        return rerender();
+      }
+      if (t.dataset.hcb) {
+        hcs.perRow.set(t.dataset.hcb, t.value);
+        return rerender();
+      }
+    });
+    host.addEventListener('click', async (e) => {
+      const a = e.target.closest('[data-hc]');
+      if (!a || a.disabled) return;
+      if (a.dataset.hc === 'save-rule') {
+        const ok = await ui.confirm({ title: 'Simpan aturan jasa bidan homecare', html: `Ubah pembagian <b>${toSave.length} tindakan homecare</b> menjadi: Bidan pelaksana <b>${u.rp(nominal)} per kunjungan</b>, sisanya ke unit?<br><small>${toSave.map((p) => u.esc(p.service.name)).join(', ')}</small><br><small>Transaksi yang sudah tersimpan tidak berubah sampai diterapkan di bagian 2.</small>`, okLabel: 'Simpan aturan' });
+        if (!ok) return;
+        try {
+          await ui.busy('Menyimpan aturan…', async (msg) => {
+            for (const [n, p] of toSave.entries()) {
+              msg('Menyimpan ' + (n + 1) + '/' + toSave.length + ': ' + p.service.name);
+              await NP.svc.save(p.next);
+            }
+          });
+          ui.toast('Aturan jasa bidan ' + u.rp(nominal) + ' per kunjungan disimpan pada ' + toSave.length + ' tindakan homecare.');
+        } catch (err) {
+          ui.toast(err.message, 'error');
+        }
+        return rerender();
+      }
+      if (a.dataset.hc === 'apply') {
+        const ok = await ui.confirm({ title: 'Terapkan jasa bidan homecare', html: `Hitung ulang <b>${u.num(chosen.length)} kunjungan homecare</b> ${u.periodLabel(st.period)}: bidan mendapat <b>${u.rp(nominal)}</b> per kunjungan. Perubahan dicatat di audit log.`, okLabel: 'Terapkan' });
+        if (!ok) return;
+        const res = { done: 0, skipped: [] };
+        await ui.busy('Menerapkan…', async (msg) => {
+          for (const [n, v] of chosen.entries()) {
+            msg('Menerapkan ' + (n + 1) + '/' + chosen.length + '…');
+            try {
+              await NP.trx.save(NP.hc.draftFor(v.t, bidanOf(v), services, nominal), { editId: v.t.id });
+              res.done++;
+            } catch (err) {
+              res.skipped.push(v.t.id + ': ' + err.message);
+            }
+          }
+        });
+        hcs.unsel.clear();
+        hcs.perRow.clear();
+        ui.toast(u.num(res.done) + ' kunjungan homecare diperbarui' + (res.skipped.length ? ', ' + res.skipped.length + ' gagal: ' + res.skipped.slice(0, 2).join('; ') : '') + '.', res.skipped.length ? 'warning' : undefined);
+        return rerender();
+      }
+    });
+  }
 
   /**
    * Ubah tindakan bervarian yang tercatat "tanpa dokter" menjadi "dengan dokter" pada transaksi yang ada.
