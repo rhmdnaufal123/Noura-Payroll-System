@@ -181,3 +181,8 @@
 /* Jasa bidan homecare (Input Bulanan) */
 #hc-table select[data-hcb] { min-width: 128px; width: 100%; max-width: 220px; }
 .hc-svc .flag { white-space: normal; }
+.hc-svc .share-chips { margin-top: 4px; }
+.hc-svc .hc-amt { width: 128px; }
+.hc-svc .hc-amt input { min-width: 0; width: 100%; }
+.hc-svc td:last-child { min-width: 118px; }
+.hc-svc th { white-space: normal; }

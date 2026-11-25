@@ -117,19 +117,22 @@
   }
   let stampSeq = 0;
   /** SVG cap bulat: nama unit melingkar di atas, keterangan di bawah, tengah: label, tanggal, jam, kode. */
-  function stampSvg(info, unitName, cfg) {
+  function stampSvg(info, unitName, cfg, bottom) {
     const id = 'st' + ++stampSeq;
     const color = /^#[0-9a-f]{6}$/i.test(cfg.stampColor || '') ? cfg.stampColor : '#006b2a';
     const label = String(cfg.stampLabel || 'DISAHKAN').toUpperCase().slice(0, 14);
     const top = String(unitName || '').toUpperCase().slice(0, 34);
     const topFs = Math.min(13, Math.max(8.5, 190 / Math.max(1, top.length * 0.72)));
     const labFs = Math.min(18, 118 / Math.max(1, label.length * 0.68));
+    const bot = '★ ' + (bottom || 'PENGESAHAN SLIP GAJI') + ' ★';
+    const botFs = bot.length > 24 ? 9 : 10.5; // teks lengkung bawah tetap muat di lingkaran
+    const botLs = bot.length > 24 ? 1 : 2;
     const svg = `<svg width="256" height="256" viewBox="0 0 200 200" xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink">
       <defs><path id="${id}t" d="M 32 100 A 68 68 0 0 1 168 100"/><path id="${id}b" d="M 24 100 A 76 76 0 0 0 176 100"/></defs>
       <g transform="rotate(-10 100 100)"><g fill="none" stroke="${color}"><circle cx="100" cy="100" r="95" stroke-width="4"/><circle cx="100" cy="100" r="87" stroke-width="1.4"/><circle cx="100" cy="100" r="57" stroke-width="1.4"/></g>
       <g fill="${color}" font-family="Arial, Helvetica, sans-serif" font-weight="700" text-anchor="middle">
         <text font-size="${topFs.toFixed(1)}" letter-spacing="1"><textPath href="#${id}t" xlink:href="#${id}t" startOffset="50%">${u.esc(top)}</textPath></text>
-        <text font-size="10.5" letter-spacing="2"><textPath href="#${id}b" xlink:href="#${id}b" startOffset="50%">★ PENGESAHAN SLIP GAJI ★</textPath></text>
+        <text font-size="${botFs}" letter-spacing="${botLs}"><textPath href="#${id}b" xlink:href="#${id}b" startOffset="50%">${u.esc(bot)}</textPath></text>
         <text x="100" y="${(86).toFixed(0)}" font-size="${labFs.toFixed(1)}" letter-spacing="1">${u.esc(label)}</text>
         <rect x="58" y="92" width="84" height="1.4"/>
         <text x="100" y="109" font-size="13">${u.esc(info.date)}</text>
@@ -141,7 +144,15 @@
     return `<img class="s-stamp" src="data:image/svg+xml;base64,${b64}" width="128" height="128" alt="Cap digital ${u.esc(label)} ${u.esc(info.date)} ${u.esc(info.time)}${info.code ? ' kode ' + u.esc(info.code) : ''}">`;
   }
 
-  /** HTML slip gaji. */
+  /** Dokter menerima SLIP PENGHASILAN (bukan slip gaji); label slip menyesuaikan. */
+  function slipKind(s) {
+    const doc = C.roleOfPosition((s.employee || {}).position) === 'dokter';
+    return doc
+      ? { doctor: true, title: 'SLIP PENGHASILAN', name: 'Slip Penghasilan', file: 'slip-penghasilan', net: 'PENGHASILAN BERSIH / TAKE HOME PAY', period: 'Periode penghasilan', receiver: 'Dokter', stamp: 'PENGESAHAN SLIP PENGHASILAN' }
+      : { doctor: false, title: 'SLIP GAJI', name: 'Slip Gaji', file: 'slip-gaji', net: 'GAJI BERSIH / TAKE HOME PAY', period: 'Periode penggajian', receiver: 'Karyawan', stamp: 'PENGESAHAN SLIP GAJI' };
+  }
+
+  /** HTML slip gaji / slip penghasilan dokter. */
   function slipHtml(run, s, opts) {
     opts = opts || {};
     const set = NP.state.settings;
@@ -152,16 +163,17 @@
     const D = NP.defaults;
     const showDetail = cfg.showServiceDetail !== false;
     const sah = cfg.stampEnabled === false ? null : stampInfo(run, s);
-    return `<div class="slip">
+    const K = slipKind(s);
+    return `<div class="slip ${K.doctor ? 'slip-doctor' : ''}">
       ${opts.draft || run.status === 'draft' ? '<div class="s-wm">DRAFT</div>' : ''}
       <div class="s-head">
         <img src="${unit.logo}" alt="Logo">
         <div class="s-org"><b>${u.esc(unit.name)}</b><small>${u.esc(unit.address || '')}</small><small>Telp. ${u.esc(unit.phone || '-')}${unit.email ? ' · ' + u.esc(unit.email) : ''}</small></div>
-        <div class="s-title"><h1>SLIP GAJI</h1><span>Periode ${u.esc(u.periodLabel(run.period))}</span><span>No. ${u.esc(s.slipNo || '(draft)')}</span></div>
+        <div class="s-title"><h1>${K.title}</h1><span>Periode ${u.esc(u.periodLabel(run.period))}</span><span>No. ${u.esc(s.slipNo || '(draft)')}</span></div>
       </div>
       <div class="s-info">
         <div><span>Nama lengkap</span><b>: ${u.esc(s.employee.name)}</b></div>
-        <div><span>Periode penggajian</span><b>: ${u.fmtDate(run.start, 'long')} – ${u.fmtDate(run.end, 'long')}</b></div>
+        <div><span>${K.period}</span><b>: ${u.fmtDate(run.start, 'long')} – ${u.fmtDate(run.end, 'long')}</b></div>
         <div><span>ID karyawan</span><b>: ${u.esc(s.employee.id)}</b></div>
         <div><span>Tanggal pembayaran</span><b>: ${u.fmtDate(run.payDate, 'long')}</b></div>
         <div><span>Jabatan</span><b>: ${u.esc(s.employee.position)}</b></div>
@@ -180,7 +192,7 @@
       <div class="s-sum">
         <div class="row"><span>Total Pendapatan</span><b>${u.rp(t.gross)}</b></div>
         <div class="row"><span>Total Potongan</span><b>${u.rp(t.deductions)}</b></div>
-        <div class="row thp"><span>GAJI BERSIH / TAKE HOME PAY</span><b>${u.rp(t.net)}</b></div>
+        <div class="row thp"><span>${K.net}</span><b>${u.rp(t.net)}</b></div>
         ${cfg.showTerbilang !== false ? `<div class="s-terbilang">Terbilang: ${u.esc(u.terbilang(t.net))}</div>` : ''}
       </div>
       ${showDetail && s.serviceDetail && s.serviceDetail.length > 6 ? `<h4>Rincian Jasa Pelayanan</h4><table class="s-detail"><thead><tr><th>Tindakan</th><th class="r">Jumlah</th><th class="r">Jasa / tindakan</th><th class="r">Total</th></tr></thead><tbody>
@@ -189,8 +201,8 @@
       ${cfg.showEmployerContrib && s.employer && s.employer.total ? `<div class="s-note">Iuran BPJS ditanggung pemberi kerja (tidak mengurangi gaji): ${u.rp(s.employer.total)}</div>` : ''}
       ${inp.slipNote ? `<div class="s-note">Catatan: ${u.esc(inp.slipNote)}</div>` : ''}
       <div class="s-sign ${sah ? 'stamped' : ''}">
-        <div><small>Mengetahui,</small><small>${u.esc(unit.leaderTitle || 'Pimpinan')}</small>${sah ? stampSvg(sah, unit.name, cfg) : ''}<div class="line">${u.esc(unit.leaderName || '(.............................)')}</div></div>
-        <div><small>Diterima oleh,</small><small>Karyawan</small><div class="line">${u.esc(s.employee.name)}</div></div>
+        <div><small>Mengetahui,</small><small>${u.esc(unit.leaderTitle || 'Pimpinan')}</small>${sah ? stampSvg(sah, unit.name, cfg, K.stamp) : ''}<div class="line">${u.esc(unit.leaderName || '(.............................)')}</div></div>
+        <div><small>Diterima oleh,</small><small>${K.receiver}</small><div class="line">${u.esc(s.employee.name)}</div></div>
       </div>
       ${sah ? `<div class="s-sah">Disahkan secara digital pada <b>${u.esc(sah.long)}</b>${sah.by ? ' oleh <b>' + u.esc(sah.by) + '</b>' : ''}${sah.code ? ' · Kode verifikasi <b>' + u.esc(sah.code) + '</b>' : ''}</div>` : ''}
       <div class="s-foot"><span>Diterbitkan: ${u.fmtDate(u.todayISO(new Date(s.issuedAt || run.approvedAt || Date.now())), 'long')} · Dibuat oleh: ${u.esc(cfg.issuerName || 'Administrator')}</span><span>${u.esc(cfg.footerNote || '')}</span></div>
@@ -198,7 +210,7 @@
   }
 
   function fileBase(run, s) {
-    return 'slip-gaji-' + run.period + '-' + s.employee.id + '-' + u.slug(s.employee.name);
+    return slipKind(s).file + '-' + run.period + '-' + s.employee.id + '-' + u.slug(s.employee.name);
   }
 
   async function toCanvas(run, s, opts) {
@@ -220,6 +232,7 @@
   const slip = {
     css: SLIP_CSS,
     html: slipHtml,
+    kind: slipKind,
     verifyCode,
     stampInfo,
     findByCode,
@@ -227,13 +240,13 @@
       return NP.exp.canvasToPdfBlob(await toCanvas(run, s, opts));
     },
     async pdf(run, s, opts) {
-      await ui.busy('Membuat PDF slip gaji...', async () => {
+      await ui.busy('Membuat PDF ' + slipKind(s).name.toLowerCase() + '...', async () => {
         NP.exp.download(await slip.pdfBlob(run, s, opts), fileBase(run, s) + '.pdf');
       });
       NP.audit.log('payslip.pdf', 'payroll', run.id, 'Unduh PDF slip ' + s.employee.name);
     },
     async png(run, s, opts) {
-      await ui.busy('Membuat gambar slip gaji...', async () => {
+      await ui.busy('Membuat gambar ' + slipKind(s).name.toLowerCase() + '...', async () => {
         NP.exp.download(await NP.exp.canvasToBlob(await toCanvas(run, s, opts)), fileBase(run, s) + '.png');
       });
     },
@@ -247,7 +260,7 @@
           body = body.replace(m[1], await ui.readFile(blob, 'dataurl'));
         } catch (_) {}
       }
-      const doc = `<!doctype html><html lang="id"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Slip Gaji ${u.esc(s.employee.name)} ${u.esc(u.periodLabel(run.period))}</title><style>body{margin:0;background:#e5e7eb;display:flex;justify-content:center;padding:20px}@page{size:A4;margin:0}@media print{body{background:#fff;padding:0}}${SLIP_CSS}</style></head><body>${body}</body></html>`;
+      const doc = `<!doctype html><html lang="id"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${slipKind(s).name} ${u.esc(s.employee.name)} ${u.esc(u.periodLabel(run.period))}</title><style>body{margin:0;background:#e5e7eb;display:flex;justify-content:center;padding:20px}@page{size:A4;margin:0}@media print{body{background:#fff;padding:0}}${SLIP_CSS}</style></head><body>${body}</body></html>`;
       NP.exp.download(new Blob([doc], { type: 'text/html;charset=utf-8' }), fileBase(run, s) + '.html');
     },
     print(run, s, opts) {
@@ -283,7 +296,7 @@
     previewModal(run, s, opts) {
       injectCss();
       const m = ui.modal({
-        title: 'Slip Gaji — ' + s.employee.name,
+        title: slipKind(s).name + ' — ' + s.employee.name,
         size: 'xl',
         body: `<div class="slip-viewport"><div class="slip-scale">${slipHtml(run, s, opts)}</div></div>`,
         actions: [

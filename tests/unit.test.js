@@ -597,6 +597,17 @@ console.log('Jasa bidan homecare per kunjungan');
     const V2 = NP.hc.visits([Object.assign({}, tOld, { items: again })], services, { nominal: 100000 });
     assert.deepStrictEqual([V2[0].status, V2[0].bidanAmount], ['ok', 100000]);
   });
+  test('nominal jasa bidan diatur per tindakan: kunjungan memakai nominal tindakan pertama', () => {
+    const paket80 = NP.hc.planService(paket, 80000).next;
+    assert.deepStrictEqual([NP.hc.ruleValue(paket80), NP.hc.ruleValue(ruledInfus), NP.hc.ruleValue(paket)], [80000, 100000, 0]);
+    const svc2 = [ruledInfus, paket80];
+    const paid = new Set();
+    const t = { id: 'TRX-9', status: 'active', date: '2026-10-20', items: [item(paket80, { bidan: 'B1' }, paid, 'p'), item(ruledInfus, { bidan: 'B1' }, paid, 'i')] };
+    const V = NP.hc.visits([t], svc2, {});
+    assert.deepStrictEqual([V[0].status, V[0].expected, V[0].bidanAmount], ['ok', 80000, 80000]);
+    assert.strictEqual(NP.hc.planService(paket80, 80000).status, 'ok');
+    assert.strictEqual(NP.hc.planService(paket80, 100000).status, 'change');
+  });
 }
 
 console.log('\n' + passed + ' lulus, ' + failures.length + ' gagal');
