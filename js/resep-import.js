@@ -20,13 +20,7 @@
   const key = (s) => norm(s).toUpperCase();
   const num = (v) => (typeof v === 'number' ? v : u.toNum(String(v == null ? '' : v).replace(/[^\d,.-]/g, '')));
 
-  /** Kunci nama pasien: huruf besar tanpa tanda baca & sapaan (Tn., Ny., Nn., An., By., Sdr., Bpk., Ibu). */
-  const TITLES = new Set(['TN', 'NY', 'NN', 'AN', 'BY', 'SDR', 'SDRI', 'BPK', 'IBU', 'NONA', 'TUAN', 'NYONYA', 'ANAK', 'BAYI']);
-  function patientKey(s) {
-    const t = key(s).replace(/[^A-Z0-9 ]/g, ' ').split(/\s+/).filter(Boolean);
-    while (t.length > 1 && TITLES.has(t[0])) t.shift();
-    return t.join(' ');
-  }
+  const patientKey = (x) => NP.C.patientKey(x);
 
   /** Baca sheet "Penebusan Resep" (array of arrays) → { meta, rows } atau null bila bukan format resep. */
   function parseSheet(aoa) {
@@ -203,7 +197,7 @@
         for (const role of roles) {
           if (role === 'dokter' && x.empId) performers.dokter = x.empId;
           else if (opt.defaults && opt.defaults[role]) performers[role] = opt.defaults[role];
-          else x.problems.push((NP.C.ROLES[role] || {}).label + ' pelaksana belum dipilih' + (role === 'dokter' ? ' (cocokkan dokter dengan Data Karyawan).' : '.'));
+          else x.problems.push((NP.C.ROLES[role] || {}).label + ' pelaksana belum dipilih' + (role === 'dokter' ? ' (cocokkan dokter dengan Data Karyawan).' : ' — pilih di bagian 3 (Tindakan untuk biaya pemeriksaan).'));
         }
         if (!x.zero && roles.every((role) => performers[role])) {
           const chk = NP.rs.compute(s, { price: r.service, qty: 1, performers, employees: empMap, withDoctor: wd });

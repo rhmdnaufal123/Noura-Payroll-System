@@ -370,6 +370,7 @@
       saveService: (s) => rpc('save_service', { p: { id: s.id || null, name: s.name, category: s.category, unit: s.unit, price: s.price, active: s.active, notes: s.notes || '', shares: s.shares, doctorShares: s.doctorShares || [], overrides: s.overrides || [] } }),
       setServiceActive: (id, active) => rpc('set_service_active', { p_id: id, p_active: active }),
       deleteService: (id) => rpc('delete_service', { p_id: id }),
+      deleteTransactions: (ids, reason) => rpc('delete_service_transactions', { p_ids: ids, p_reason: reason }),
       /** Simpan banyak transaksi dalam satu transaksi database (input bulanan / impor POS). */
       bulkSaveTransactions: (list, source) =>
         rpc('create_service_transactions_bulk', {

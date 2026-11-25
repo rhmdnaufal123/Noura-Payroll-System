@@ -51,19 +51,27 @@
   };
 
   /** Jumlah pasien (transaksi unik) & tindakan yang dilayani karyawan sebagai pelaksana. */
+  /** Jumlah pasien & tindakan yang dikerjakan karyawan (untuk honor per pasien / per tindakan).
+   *  Homecare dihitung per kunjungan: 1 pasien dengan banyak tindakan homecare = 1 pasien & 1 tindakan. */
   inc.performed = function (trxs, empId, start, end) {
     const ids = new Set();
+    const hcVisits = new Set();
     let qty = 0;
     for (const t of trxs) {
       if (t.status !== 'active' || !u.inRange(t.date, start, end)) continue;
       for (const it of t.items) {
-        if (Object.values(it.performers || {}).includes(empId)) {
-          ids.add(t.id);
+        if (!Object.values(it.performers || {}).includes(empId)) continue;
+        if (NP.C.serviceGroup(it.category, it.serviceName) === 'homecare') {
+          const k = NP.C.visitKey(t);
+          hcVisits.add(k);
+          ids.add(k);
+        } else {
+          ids.add('T:' + t.id);
           qty += it.qty;
         }
       }
     }
-    return { patients: ids.size, actions: qty };
+    return { patients: ids.size, actions: qty + hcVisits.size };
   };
 
   /* ---------- Catatan shift & sesi praktik ---------- */

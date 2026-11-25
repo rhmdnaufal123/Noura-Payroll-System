@@ -325,6 +325,18 @@ async function step(name, fn) {
     await A.waitForFunction(() => document.querySelectorAll('#an-svc tbody tr').length === 4);
   });
 
+  await step('hapus transaksi lewat Riwayat (server): admin saja, yang sudah digaji dilewati, struk dapat diimpor ulang', async () => {
+    const ids = (await sql("select id from public.service_transactions where external_ref like 'POS:%' order by id limit 2")).map((r) => r.id);
+    const res = await A.evaluate(async ([ids, locked]) => NP.trx.removeMany(ids.concat([locked]), 'uji hapus server'), [ids, ID.trx]);
+    assert.deepStrictEqual(res.deleted.sort(), ids.sort());
+    assert.deepStrictEqual(res.skipped.map((x) => x.id), [ID.trx], 'transaksi dalam penggajian terkunci dilewati');
+    assert.strictEqual((await sql('select count(*)::int n from public.service_transactions where id = any($1)', [ids]))[0].n, 0);
+    assert.strictEqual((await sql("select count(*)::int n from public.audit_logs where action = 'trx.delete'"))[0].n, 2);
+    await go(A, 'transactions');
+    assert.ok(await A.locator('#h-selall').count(), 'admin melihat kotak centang');
+    await go(B, 'transactions');
+    assert.strictEqual(await B.locator('#h-selall').count(), 0, 'pengguna lain tidak');
+  });
   await step('tindakan dengan & tanpa dokter: master tersimpan per varian, transaksi memakai pembagian yang dipilih', async () => {
     const ids = await A.evaluate(async (bidan) => {
       const dr = await NP.emp.save(Object.assign(NP.emp.blank(), { name: 'dr. Pusat Satu', phone: '081299990003', unit: 'KLINIK', position: 'Dokter Umum', department: 'Pelayanan Medis', payScheme: 'service_only', baseSalary: 0 }));
