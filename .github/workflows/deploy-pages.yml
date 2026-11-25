@@ -22,7 +22,7 @@ jobs:
     runs-on: ubuntu-latest
     environment:
       name: github-pages
-      url: ${{ steps.pages.outputs.page_url }}
+      url: ${{ steps.pages.outputs.page_url || steps.pages_retry.outputs.page_url }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -43,5 +43,14 @@ jobs:
       - uses: actions/upload-pages-artifact@v3
         with:
           path: _site
+      # Kadang GitHub belum "melihat" paket yang baru diunggah ("No artifacts named github-pages"):
+      # tunggu sebentar lalu coba sekali lagi, alih-alih gagal dan harus dijalankan ulang manual.
       - id: pages
+        continue-on-error: true
+        uses: actions/deploy-pages@v4
+      - name: Tunggu sebelum mencoba ulang publikasi
+        if: steps.pages.outcome == 'failure'
+        run: sleep 45
+      - id: pages_retry
+        if: steps.pages.outcome == 'failure'
         uses: actions/deploy-pages@v4
