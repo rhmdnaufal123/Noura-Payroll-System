@@ -259,6 +259,67 @@
     return res;
   };
 
+  /** Hak & status ubah: { ok, reason } — dipakai tombol dengan/tanpa dokter di daftar. */
+  trx.canQuickEdit = function (t) {
+    const usr = NP.sec.user();
+    if (t.status !== 'active') return { ok: false, reason: 'Transaksi dibatalkan' };
+    if (!NP.sec.can('trx.editAny') && !(NP.sec.can('trx.editOwn') && usr && t.createdBy === usr.username)) return { ok: false, reason: 'Hanya transaksi yang Anda input sendiri' };
+    try {
+      if (checkEditable(t).locked) return { ok: false, reason: 'Periode gaji terkunci — ubah lewat Riwayat Transaksi (otorisasi admin)' };
+    } catch (e) {
+      return { ok: false, reason: 'Penggajian sudah disetujui' };
+    }
+    return { ok: true };
+  };
+
+  /**
+   * Ubah pilihan dengan/tanpa dokter pada item tertentu suatu transaksi.
+   * @param changes { lineId: true|false }
+   * @param opt { doctorId } dokter pelaksana bila item menjadi "dengan dokter" dan belum ada dokternya
+   * Error.code 'NEED_ROLE' (e.role) bila pelaksana yang dibutuhkan belum ada.
+   */
+  trx.setVariant = async function (id, changes, opt) {
+    opt = opt || {};
+    const t = await trx.get(id);
+    if (!t) throw new Error('Transaksi tidak ditemukan.');
+    const q = trx.canQuickEdit(t);
+    if (!q.ok) throw new Error(t.id + ': ' + q.reason + '.');
+    const services = new Map((await NP.db.all('services')).map((x) => [x.id, x]));
+    let changed = 0;
+    const items = t.items.map((i) => {
+      const sv = services.get(i.serviceId);
+      const want = Object.prototype.hasOwnProperty.call(changes, i.lineId) && sv && rs.hasDoctorVariant(sv) ? !!changes[i.lineId] : !!i.withDoctor;
+      const performers = Object.assign({}, i.performers);
+      if (want !== !!i.withDoctor) {
+        changed++;
+        if (want && !performers.dokter && opt.doctorId) performers.dokter = opt.doctorId;
+        const miss = rs.requiredRoles(sv, want).filter((role) => !performers[role]);
+        if (miss.length) {
+          const e = new Error(i.serviceName + ': ' + ((C.ROLES[miss[0]] || {}).label || miss[0]) + ' pelaksana belum dipilih.');
+          e.code = 'NEED_ROLE';
+          e.role = miss[0];
+          throw e;
+        }
+      }
+      return { lineId: i.lineId, serviceId: i.serviceId, qty: i.qty, price: i.price, withDoctor: want, performers };
+    });
+    if (!changed) return t;
+    return trx.save({ date: t.date, patient: t.patient, patientCode: t.patientCode, note: t.note, items }, { editId: t.id });
+  };
+
+  /** Item bervarian yang menurut aturan seharusnya "dengan dokter" (pasien diperiksa dokter / transaksi memuat pemeriksaan). */
+  trx.doctorSuggestions = function (t, examIdx, services) {
+    if (t.status !== 'active' || !NP.resep) return [];
+    const hits = t.patient ? (examIdx.get(NP.resep.patientKey(t.patient) + '|' + t.date) || []).filter((h) => !(h.src === 'db' && h.ref === t.id)) : [];
+    const inTrx = t.items.find((i) => NP.resep.isDoctorExam(i.serviceName, i.category));
+    if (!hits.length && !inTrx) return [];
+    const reason = hits.length ? 'pasien diperiksa dokter (' + hits.map(NP.resep.examLabel).join(', ') + ')' : 'transaksi memuat ' + inTrx.serviceName;
+    const doctorId = (hits.find((h) => h.doctorId) || {}).doctorId || (inTrx && inTrx.performers && inTrx.performers.dokter) || '';
+    return t.items
+      .filter((i) => !i.withDoctor && services.get(i.serviceId) && rs.hasDoctorVariant(services.get(i.serviceId)))
+      .map((i) => ({ lineId: i.lineId, serviceName: i.serviceName, reason, doctorId }));
+  };
+
   /** Batalkan transaksi. Transaksi terkunci memerlukan otorisasi (opt.auth) dan menghasilkan adjustment negatif. */
   trx.cancel = async function (id, reason, opt) {
     opt = opt || {};
@@ -409,7 +470,9 @@
           </div>
         </aside>
       </div>
-      ${editing ? '' : `<div class="card"><div class="card-head"><h3>Transaksi hari ini</h3><a href="#/transactions" class="link">Lihat semua</a></div><div id="today-list"></div></div>`}`;
+      ${editing ? '' : `<div class="card"><div class="card-head"><h3>Transaksi tanggal <input type="date" id="tl-date" class="tl-date" value="${u.todayISO()}" max="${u.todayISO()}" aria-label="Tanggal daftar transaksi"></h3><a href="#/transactions" class="link">Lihat semua</a></div>
+        <p class="muted small">Klik label <b>dengan dokter / tanpa dokter</b> untuk mengubah pembagian tiap tindakan satu per satu. Tindakan pasien yang diperiksa dokter ditandai <b>disarankan</b>.</p>
+        <div id="tl-auto"></div><div id="today-list"></div></div>`}`;
 
     const form = ui.$('.input-form', view);
     const rowsEl = ui.$('#item-rows', view);
@@ -597,6 +660,7 @@
           form.patientCode.value = '';
           form.note.value = '';
           drawRows();
+          await offerAutoAfterExam(saved);
           drawToday();
         }
       } catch (e) {
@@ -632,14 +696,69 @@
       if (a.dataset.act === 'print-trx') trx.get(a.dataset.id).then(trx.printReceipt);
     });
 
+    /** Pilih dokter pelaksana (dipakai bila dokter yang memeriksa tidak diketahui). */
+    function pickDoctor(title) {
+      const staff = staffFor('dokter');
+      if (!staff.length) {
+        ui.toast('Belum ada dokter di Data Karyawan.', 'error');
+        return Promise.resolve(null);
+      }
+      return new Promise((resolve) => {
+        ui.modal({
+          title: title || 'Pilih dokter pelaksana',
+          size: 'sm',
+          body: `<label class="field"><span>Dokter pelaksana <b class="req">*</b></span><select name="doc">${ui.options(staff.map((e) => [e.id, e.name]), lastPerf.dokter)}</select></label>`,
+          actions: [
+            { label: 'Batal', cls: 'btn-ghost', onClick: (m) => { m.close(true); resolve(null); } },
+            { label: 'Pilih', cls: 'btn-primary', onClick: (m) => { const v = m.el.querySelector('[name=doc]').value; m.close(true); resolve(v || null); } }
+          ],
+          onClose: () => resolve(null)
+        });
+      });
+    }
+    /** Terapkan perubahan varian; tanyakan dokter bila perlu. */
+    async function applyVariant(tid, changes, doctorId) {
+      try {
+        return await trx.setVariant(tid, changes, { doctorId });
+      } catch (e) {
+        if (e.code !== 'NEED_ROLE' || e.role !== 'dokter') throw e;
+        const d = await pickDoctor('Dokter pelaksana untuk ' + tid);
+        if (!d) return null;
+        lastPerf.dokter = d;
+        return trx.setVariant(tid, changes, { doctorId: d });
+      }
+    }
+    async function refreshExam() {
+      if (NP.resep) examIdx = NP.resep.examIndex({ trxs: await trx.all() });
+    }
+
     async function drawToday() {
       const el = ui.$('#today-list', view);
       if (!el) return;
-      const list = (await trx.all()).filter((t) => t.date === u.todayISO());
+      const dateEl = ui.$('#tl-date', view);
+      const day = (dateEl && dateEl.value) || u.todayISO();
+      const services = new Map((await NP.svc.all()).map((x) => [x.id, x]));
+      const all = await trx.all();
+      const allIdx = NP.resep ? NP.resep.examIndex({ trxs: all }) : new Map();
+      const list = all.filter((t) => t.date === day);
+      const sugg = new Map(list.map((t) => [t.id, trx.doctorSuggestions(t, allIdx, services)]));
+      const editableSugg = list.filter((t) => sugg.get(t.id).length && trx.canQuickEdit(t).ok);
+      const nSugg = u.sum(editableSugg, (t) => sugg.get(t.id).length);
+      ui.$('#tl-auto', view).innerHTML = nSugg
+        ? `<div class="alert alert-info">${ui.icon('info')}<div><b>${u.num(nSugg)} tindakan</b> pada ${u.num(editableSugg.length)} transaksi disarankan <b>dengan dokter</b> karena pasiennya diperiksa dokter.</div><button type="button" class="btn btn-sm btn-primary" data-act="tl-auto">Terapkan otomatis (${u.num(nSugg)})</button></div>`
+        : '';
+      const itemHtml = (t, i) => {
+        const sv = services.get(i.serviceId);
+        const base = u.esc(i.serviceName) + ' ×' + i.qty;
+        if (!sv || !rs.hasDoctorVariant(sv)) return base;
+        const q = trx.canQuickEdit(t);
+        const sg = sugg.get(t.id).find((x) => x.lineId === i.lineId);
+        return `${base} <button type="button" class="wd-toggle ${i.withDoctor ? 'on' : ''}" data-tl="${u.esc(t.id)}" data-line="${u.esc(i.lineId)}" data-wdv="${i.withDoctor ? 1 : 0}" ${q.ok ? '' : 'disabled'} title="${u.esc(q.ok ? 'Klik untuk mengganti' : q.reason)}">${i.withDoctor ? 'dengan dokter' : 'tanpa dokter'}</button>${sg ? ` <span class="flag flag-low" title="${u.esc(sg.reason)}">disarankan dengan dokter</span>` : ''}`;
+      };
       ui.table(el, {
         columns: [
-          { key: 'id', label: 'No. Transaksi' },
-          { key: 'items', label: 'Tindakan', render: (t) => t.items.map((i) => u.esc(trx.itemLabel(i)) + ' ×' + i.qty).join('<br>'), sortable: false },
+          { key: 'id', label: 'No. Transaksi', render: (t) => `${u.esc(t.id)}${t.patient ? `<small class="block muted">${u.esc(t.patient)}</small>` : ''}` },
+          { key: 'items', label: 'Tindakan', render: (t) => t.items.map((i) => itemHtml(t, i)).join('<br>'), sortable: false },
           { key: 'perf', label: 'Petugas', render: (t) => u.esc([...new Set([].concat(...t.items.map((i) => Object.values(i.performerNames || {}))))].join(', ') || '-'), sortable: false },
           { key: 'gross', label: 'Total', align: 'right', render: (t) => u.rp(t.totals.gross), value: (t) => t.totals.gross },
           { key: 'status', label: 'Status', render: (t) => ui.statusBadge(t.status) },
@@ -647,9 +766,83 @@
         ],
         rows: list,
         pageSize: 10,
-        empty: 'Belum ada transaksi hari ini.'
+        cards: true,
+        rowClass: (t) => (sugg.get(t.id).length ? 'tl-sugg' : ''),
+        empty: day === u.todayISO() ? 'Belum ada transaksi hari ini.' : 'Tidak ada transaksi pada tanggal ini.'
       });
     }
+    // klik label dengan/tanpa dokter di daftar (satu per satu)
+    view.addEventListener('click', async (e) => {
+      const b = e.target.closest('[data-tl]');
+      if (b && view.contains(b) && !b.disabled) {
+        const on = b.dataset.wdv !== '1';
+        b.disabled = true;
+        try {
+          const t = await trx.get(b.dataset.tl);
+          const sg = on && NP.resep ? trx.doctorSuggestions(t, NP.resep.examIndex({ trxs: await trx.all() }), new Map((await NP.svc.all()).map((x) => [x.id, x]))).find((x) => x.lineId === b.dataset.line) : null;
+          const saved = await applyVariant(t.id, { [b.dataset.line]: on }, (sg && sg.doctorId) || '');
+          if (saved) ui.toast(t.id + ': ' + (t.items.find((i) => i.lineId === b.dataset.line) || {}).serviceName + ' → ' + (on ? 'dengan dokter' : 'tanpa dokter') + '.');
+        } catch (err) {
+          ui.toast(err.message, 'error');
+        }
+        await refreshExam();
+        drawToday();
+        return;
+      }
+      if (e.target.closest('[data-act="tl-auto"]')) {
+        const res = await ui.busy('Menerapkan pembagian dengan dokter…', () => autoApply((ui.$('#tl-date', view) || {}).value || u.todayISO()));
+        ui.toast(u.num(res.done) + ' transaksi diubah menjadi dengan dokter' + (res.skipped.length ? '; ' + res.skipped.length + ' dilewati: ' + res.skipped.join('; ') : '') + '.', res.skipped.length ? 'warning' : undefined);
+        await refreshExam();
+        drawToday();
+      }
+    });
+    /** Setelah menyimpan pemeriksaan dokter: tawarkan ubah tindakan pasien yang sama pada tanggal itu. */
+    async function offerAutoAfterExam(saved) {
+      if (!NP.resep || !saved.patient || !saved.items.some((i) => NP.resep.isDoctorExam(i.serviceName, i.category))) return;
+      const key = NP.resep.patientKey(saved.patient);
+      const services = new Map((await NP.svc.all()).map((x) => [x.id, x]));
+      const all = await trx.all();
+      const idx = NP.resep.examIndex({ trxs: all });
+      const cand = all.filter((t) => t.id !== saved.id && t.date === saved.date && NP.resep.patientKey(t.patient) === key && trx.canQuickEdit(t).ok && trx.doctorSuggestions(t, idx, services).length);
+      if (!cand.length) return;
+      const ok = await ui.confirm({
+        title: 'Pasien diperiksa dokter',
+        html: `<b>${u.esc(saved.patient)}</b> juga memiliki ${u.num(cand.length)} transaksi tindakan pada tanggal ini yang tercatat <b>tanpa dokter</b> (${cand.map((t) => u.esc(t.id)).join(', ')}). Ubah menjadi <b>dengan dokter</b>?`,
+        okLabel: 'Ya, ubah'
+      });
+      if (!ok) return;
+      const res = await autoApply(saved.date, key);
+      ui.toast(u.num(res.done) + ' transaksi diubah menjadi dengan dokter' + (res.skipped.length ? '; ' + res.skipped.length + ' dilewati' : '') + '.');
+      await refreshExam();
+    }
+    /** Terapkan aturan "dengan dokter" ke transaksi pada tanggal tertentu (opsional: hanya satu pasien). */
+    async function autoApply(day, patientKey) {
+      const services = new Map((await NP.svc.all()).map((x) => [x.id, x]));
+      const all = await trx.all();
+      const idx = NP.resep.examIndex({ trxs: all });
+      const res = { done: 0, skipped: [] };
+      for (const t of all.filter((x) => x.date === day && (!patientKey || NP.resep.patientKey(x.patient) === patientKey))) {
+        const sg = trx.doctorSuggestions(t, idx, services);
+        if (!sg.length || !trx.canQuickEdit(t).ok) continue;
+        try {
+          const saved = await applyVariant(t.id, Object.fromEntries(sg.map((x) => [x.lineId, true])), sg[0].doctorId || lastPerf.dokter || '');
+          if (saved) res.done++;
+          else res.skipped.push(t.id + ' (dokter tidak dipilih)');
+        } catch (err) {
+          res.skipped.push(t.id + ' (' + err.message + ')');
+        }
+      }
+      return res;
+    }
+    const tlDate = ui.$('#tl-date', view);
+    if (tlDate) tlDate.onchange = () => drawToday();
+    // tanggal transaksi di form berubah → daftar ikut tanggal tersebut
+    form.date.addEventListener('change', () => {
+      if (tlDate && form.date.value) {
+        tlDate.value = form.date.value;
+        drawToday();
+      }
+    });
     drawRows();
     drawToday();
   }

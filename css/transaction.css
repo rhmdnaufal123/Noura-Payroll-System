@@ -166,3 +166,7 @@
 .wd-toggle.on { border-style: solid; border-color: color-mix(in srgb, var(--primary) 45%, transparent); background: color-mix(in srgb, var(--primary) 14%, transparent); color: var(--primary-ink, var(--primary)); }
 .wd-toggle:focus-visible { outline: 2px solid var(--primary); outline-offset: 1px; }
 .wd-auto { display: block; color: var(--primary-ink, var(--primary)); font-size: 11.5px; margin-top: 2px; }
+/* Daftar transaksi di Input Tindakan */
+.tl-date { display: inline-block; width: auto; min-height: 34px; padding: 4px 8px; margin-left: 6px; font-size: 14px; font-weight: 600; vertical-align: middle; }
+.tbl tr.tl-sugg > td:first-child { box-shadow: inset 4px 0 0 var(--warning); }
+.wd-toggle:disabled { cursor: not-allowed; opacity: .6; }

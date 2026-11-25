@@ -38,7 +38,7 @@ async function step(name, fn) {
     if (process.env.E2E_SHOTS && shotPage) await shotPage.screenshot({ path: path.join(process.env.E2E_SHOTS, 'fail-' + failures.length + '.png') }).catch(() => {});
     // tutup modal yang tertinggal agar langkah berikutnya tidak terhalang
     if (shotPage) await shotPage.evaluate(() => document.querySelectorAll('.modal-backdrop').forEach((m) => m.remove())).catch(() => {});
-    console.log('  ✗ ' + name + '\n    ' + (e.stack || e.message).split('\n').slice(0, 3).join('\n    '));
+    console.log('  ✗ ' + name + '\n    ' + (e.stack || e.message).split('\n').slice(0, process.env.E2E_VERBOSE ? 30 : 3).join('\n    '));
   }
 }
 
@@ -78,6 +78,14 @@ async function step(name, fn) {
     page.waitForFunction((src) => new RegExp(src).test([...document.querySelectorAll('.toast')].map((t) => t.textContent).join(' ')), re.source, { timeout: 30000 }).catch(async (e) => {
       throw new Error('Toast /' + re.source + '/ tidak muncul. Toast: ' + (await page.locator('.toast').allInnerTexts().catch(() => [])).join(' | '));
     });
+  /** Jalankan aksi lalu tunggu toast BARU yang cocok (toast lama yang masih tampil diabaikan). */
+  const newToast = async (fn, re) => {
+    await page.evaluate(() => document.querySelectorAll('.toast').forEach((t) => (t.dataset.seen = '1')));
+    await fn();
+    await page.waitForFunction((src) => [...document.querySelectorAll('.toast:not([data-seen])')].some((t) => new RegExp(src).test(t.textContent)), re.source, { timeout: 30000 }).catch(async () => {
+      throw new Error('Toast baru /' + re.source + '/ tidak muncul. Toast: ' + (await page.locator('.toast').allInnerTexts().catch(() => [])).join(' | '));
+    });
+  };
   const modalBtn = (label) => page.locator('.modal-backdrop').last().locator('.modal-foot button', { hasText: label });
   const download = async (fn) => {
     const [d] = await Promise.all([page.waitForEvent('download', { timeout: 60000 }), fn()]);
@@ -266,6 +274,12 @@ async function step(name, fn) {
   });
 
   console.log('Input tindakan');
+  const prevMonthEarly = (() => {
+    const d = new Date();
+    d.setDate(1);
+    d.setMonth(d.getMonth() - 1);
+    return d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-03';
+  })();
   let trxGula;
   await step('input Gula Darah × 5 oleh bidan baru: Rp140.000 / Rp90.000 / Rp50.000', async () => {
     await go('input');
@@ -413,6 +427,65 @@ async function step(name, fn) {
     await page.selectOption('.item-row >> nth=1 >> [data-f=serviceId]', ids.sv);
     await page.waitForSelector('.item-row >> nth=1 >> .item-variant [data-wd="1"].active');
     await page.click('[data-act=reset]');
+  });
+  await step('daftar Input Tindakan: dengan/tanpa dokter satu per satu, saran & otomasi', async () => {
+    const ids = await ev(async () => {
+      const s = await NP.db.all('services');
+      const e = await NP.db.all('employees');
+      const bd = e.find((x) => x.position === 'Bidan' && x.status === 'aktif' && x.name !== 'Bd. Uji Coba');
+      return { sv: s.find((x) => x.name === 'Suntik Vitamin Uji').id, kons: s.find((x) => x.name === 'Konsultasi Dokter Umum').id, dr: e.find((x) => x.name === 'dr. Siti Rahmawati').id, bd: bd.id };
+    });
+    const itemOf = (patient) => ev(async (p) => {
+      const t = (await NP.db.all('transactions')).find((x) => x.patient === p && x.items.some((i) => i.serviceName === 'Suntik Vitamin Uji'));
+      const i = t.items.find((x) => x.serviceName === 'Suntik Vitamin Uji');
+      return { id: t.id, wd: !!i.withDoctor, dokter: i.performers.dokter || '', bidan: i.performers.bidan || '' };
+    }, patient);
+    await go('input');
+    // 1) tindakan dulu (tanpa dokter), pemeriksaan dokter kemudian → ditawari mengubah otomatis
+    await page.fill('.input-form [name=patient]', 'Tn. Urutan Dua');
+    await page.selectOption('.item-row [data-f=serviceId]', ids.sv);
+    await page.selectOption('.item-row [data-perf=bidan]', ids.bd);
+    await clickToast('[data-act=save]', /tersimpan/);
+    assert.strictEqual((await itemOf('Tn. Urutan Dua')).wd, false);
+    await page.fill('.input-form [name=patient]', 'Tn. Urutan Dua');
+    await page.selectOption('.item-row [data-f=serviceId]', ids.kons);
+    await page.selectOption('.item-row [data-perf=dokter]', ids.dr);
+    await page.click('[data-act=save]');
+    await page.waitForSelector('.modal-head:has-text("Pasien diperiksa dokter")');
+    await newToast(() => modalBtn('Ya, ubah').click(), /1 transaksi diubah menjadi dengan dokter/);
+    let it = await itemOf('Tn. Urutan Dua');
+    assert.deepStrictEqual([it.wd, it.dokter, it.bidan], [true, ids.dr, ids.bd], 'dokter pelaksana = dokter yang memeriksa');
+    // 2) daftar: label dapat diklik satu per satu
+    const lbl = () => page.locator(`#today-list [data-tl="${it.id}"]`);
+    await page.waitForFunction((id) => { const b = document.querySelector('#today-list [data-tl="' + id + '"]'); return b && /dengan dokter/.test(b.textContent); }, it.id);
+    await newToast(() => lbl().click(), /→ tanpa dokter/);
+    assert.strictEqual((await itemOf('Tn. Urutan Dua')).wd, false);
+    // 3) aturan otomatis: tindakan pasien yang diperiksa dokter ditandai & dapat diterapkan sekaligus
+    await page.waitForSelector('#tl-auto [data-act=tl-auto]');
+    assert.ok(/Terapkan otomatis \(1\)/.test(await page.locator('#tl-auto').innerText()));
+    assert.ok(await page.locator('#today-list tr.tl-sugg').count() >= 1);
+    await newToast(() => page.click('#tl-auto [data-act=tl-auto]'), /1 transaksi diubah menjadi dengan dokter/);
+    it = await itemOf('Tn. Urutan Dua');
+    assert.deepStrictEqual([it.wd, it.dokter], [true, ids.dr]);
+    await page.waitForFunction(() => !document.querySelector('#tl-auto [data-act=tl-auto]'));
+    // 4) dokter belum diketahui → aplikasi menanyakan dokter
+    await page.fill('.input-form [name=patient]', 'Ny. Tanpa Periksa');
+    await page.selectOption('.item-row [data-f=serviceId]', ids.sv);
+    await page.selectOption('.item-row [data-perf=bidan]', ids.bd);
+    await clickToast('[data-act=save]', /tersimpan/);
+    const t2 = await itemOf('Ny. Tanpa Periksa');
+    await page.waitForSelector(`#today-list [data-tl="${t2.id}"]`);
+    await page.click(`#today-list [data-tl="${t2.id}"]`);
+    await page.waitForSelector('.modal-head:has-text("Dokter pelaksana")');
+    await page.selectOption('.modal [name=doc]', ids.dr);
+    await newToast(() => modalBtn('Pilih').click(), /→ dengan dokter/);
+    assert.deepStrictEqual([(await itemOf('Ny. Tanpa Periksa')).wd, (await itemOf('Ny. Tanpa Periksa')).dokter], [true, ids.dr]);
+    // 5) tanggal daftar mengikuti tanggal form
+    await page.fill('.input-form [name=date]', prevMonthEarly);
+    await page.dispatchEvent('.input-form [name=date]', 'change');
+    await page.waitForFunction((d) => document.querySelector('#tl-date').value === d, prevMonthEarly);
+    await page.fill('.input-form [name=date]', await ev(() => NP.u.todayISO()));
+    await page.dispatchEvent('.input-form [name=date]', 'change');
   });
   await step('tanpa memilih petugas → tidak bisa disimpan', async () => {
     await go('input');
