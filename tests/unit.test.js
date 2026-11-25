@@ -378,7 +378,7 @@ console.log('Impor POS, input bulanan & analisis tindakan');
     const R = NP.income.jasaReport(trxs, { start: '2026-10-01', end: '2026-10-31' });
     assert.deepStrictEqual(R.totals, { konsultasi: { D: 80000, B: 15000 }, jasa: { D: 25000, B: 25000 }, homecare: { D: 300000, B: 100000 } });
     assert.deepStrictEqual(R.grand, { D: 405000, B: 140000 });
-    assert.deepStrictEqual([R.rows.konsultasi.length, R.rows.jasa.length, R.rows.homecare.length], [1, 2, 2], 'PEMERIKSAAN DOKTER dari kasir masuk bagian jasa');
+    assert.deepStrictEqual([R.rows.konsultasi.length, R.rows.jasa.length, R.rows.homecare.length], [2, 1, 2], 'PEMERIKSAAN DOKTER yang dibayar di kasir masuk bagian konsultasi');
   });
   test('tabel bulanan: satu transaksi per tanggal terisi, maks. 50 tindakan per transaksi', () => {
     const svcMap = new Map(services.map((s) => [s.id, s]));

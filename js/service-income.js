@@ -80,7 +80,8 @@
   /** Bagian laporan untuk satu item: homecare, konsultasi (biaya pemeriksaan / resep), atau jasa tindakan. */
   inc.sectionOf = function (t, it) {
     if (NP.C.serviceGroup(it.category, it.serviceName) === 'homecare') return 'homecare';
-    if ((t.externalRef && /^RESEP:/.test(t.externalRef)) || (EXAM_RE.test(it.serviceName) && !/^POS:/.test(t.externalRef || ''))) return 'konsultasi';
+    // biaya pemeriksaan dokter: dari resep, input manual, atau "Pemeriksaan Dokter" yang dibayar di kasir
+    if ((t.externalRef && /^RESEP:/.test(t.externalRef)) || EXAM_RE.test(it.serviceName)) return 'konsultasi';
     return 'jasa';
   };
   /**
