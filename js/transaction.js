@@ -42,9 +42,12 @@
   trx.pendingAdjustments = (t) => (t.adjustments || []).filter((a) => !a.payroll || !a.payroll.runId);
 
   /** Bangun satu item transaksi dari master tindakan (snapshot). */
-  trx.buildItem = function (service, input, empMap) {
+  /** Kunci bagian "per kunjungan" yang sudah dibayar oleh suatu item. */
+  trx.paidKeys = (item) => (item.shares || []).filter((x) => x.perVisit && x.amount > 0).map((x) => rs.visitKeyOf(x));
+
+  trx.buildItem = function (service, input, empMap, paid) {
     const wd = rs.effectiveWithDoctor(service, input.withDoctor);
-    const r = rs.compute(service, { price: input.price, qty: input.qty, performers: input.performers, employees: empMap, withDoctor: wd });
+    const r = rs.compute(service, { price: input.price, qty: input.qty, performers: input.performers, employees: empMap, withDoctor: wd, paid: paid ? [...paid] : [] });
     if (r.errors.length) {
       const e = new Error(service.name + ': ' + r.errors.join(' '));
       e.errors = r.errors;
@@ -137,11 +140,16 @@
     const services = new Map((await NP.db.all('services')).map((s) => [s.id, s]));
     const empMap = await NP.emp.map();
     const old = opt.editId ? await trx.get(opt.editId) : null;
+    const paid = new Set(); // bagian per kunjungan yang sudah dibayar item sebelumnya
+    const keep = (it) => {
+      trx.paidKeys(it).forEach((k) => paid.add(k));
+      return it;
+    };
     const items = draft.items.map((inp, idx) => {
       // Untuk edit: item lama yang tidak diubah (tindakan, harga, jumlah, petugas sama) tetap memakai snapshot lama.
       const prev = old && old.items.find((x) => x.lineId === inp.lineId);
       if (prev && prev.serviceId === inp.serviceId && prev.qty === u.toInt(inp.qty) && prev.price === u.toInt(inp.price) && !!prev.withDoctor === !!inp.withDoctor && JSON.stringify(prev.performers) === JSON.stringify(cleanPerf(inp.performers, prev))) {
-        return u.clone(prev);
+        return keep(u.clone(prev));
       }
       const svc = services.get(inp.serviceId);
       if (!svc) throw new Error('Baris ' + (idx + 1) + ': tindakan tidak ditemukan.');
@@ -152,7 +160,7 @@
       }
       if (!(u.toInt(inp.price) > 0)) throw new Error('Baris ' + (idx + 1) + ': harga jual harus lebih dari 0.');
       if (!(u.toInt(inp.qty) >= 1)) throw new Error('Baris ' + (idx + 1) + ': jumlah minimal 1.');
-      return trx.buildItem(svc, inp, empMap);
+      return keep(trx.buildItem(svc, inp, empMap, paid));
     });
     function cleanPerf(p, prev) {
       const o = {};
@@ -524,10 +532,18 @@
     function computeRow(r) {
       const s = svcMap.get(r.serviceId);
       if (!s) return null;
-      return rs.compute(s, { price: r.price, qty: r.qty, performers: r.performers, employees: empMap, withDoctor: r.withDoctor });
+      // bagian "per kunjungan" yang sudah dibayar baris sebelumnya pada transaksi ini
+      const paid = new Set();
+      for (const x of rows) {
+        if (x === r) break;
+        const sx = svcMap.get(x.serviceId);
+        if (!sx) continue;
+        (rs.compute(sx, { price: x.price, qty: x.qty, performers: x.performers, employees: empMap, withDoctor: x.withDoctor, paid: [...paid] }).paid || []).forEach((k) => paid.add(k));
+      }
+      return rs.compute(s, { price: r.price, qty: r.qty, performers: r.performers, employees: empMap, withDoctor: r.withDoctor, paid: [...paid] });
     }
     function fillPerformers(r, s) {
-      for (const role of rs.requiredRoles(s, r.withDoctor)) if (!r.performers[role] && lastPerf[role] && staffFor(role).some((x) => x.id === lastPerf[role])) r.performers[role] = lastPerf[role];
+      for (const role of rs.requiredRoles(s, r.withDoctor)) if (!r.performers[role] && !(r.skipPerf && r.skipPerf[role]) && lastPerf[role] && staffFor(role).some((x) => x.id === lastPerf[role])) r.performers[role] = lastPerf[role];
     }
 
     function examHitsNow() {
@@ -576,7 +592,10 @@
               ${rows.length > 1 ? `<button type="button" class="icon-btn danger item-del" data-del="${i}" title="Hapus baris">${ui.icon('trash')}</button>` : ''}
             </div>
             ${variant ? `<div class="item-variant"><span>Pelaksanaan</span><div class="seg" role="group" aria-label="Dengan atau tanpa dokter"><button type="button" class="seg-btn ${r.withDoctor ? '' : 'active'}" data-wd="0" aria-pressed="${!r.withDoctor}">Tanpa dokter</button><button type="button" class="seg-btn ${r.withDoctor ? 'active' : ''}" data-wd="1" aria-pressed="${!!r.withDoctor}">Dengan dokter</button></div>${autoNote}</div>` : ''}
-            ${roles.length ? `<div class="item-perf">${roles.map((role) => `<label class="field"><span>${C.ROLES[role].label} pelaksana <b class="req">*</b></span><select data-perf="${role}">${ui.options(staffFor(role).map((e) => [e.id, e.name + (e.status === 'cuti' ? ' (cuti)' : '')]), r.performers[role], '— pilih ' + C.ROLES[role].label.toLowerCase() + ' —')}</select></label>`).join('')}</div>` : ''}
+            ${roles.length ? `<div class="item-perf">${roles.map((role) => {
+              const opt = rs.optionalRoles(s, r.withDoctor).includes(role);
+              return `<label class="field"><span>${C.ROLES[role].label} pelaksana ${opt ? '<small class="muted">(opsional)</small>' : '<b class="req">*</b>'}</span><select data-perf="${role}">${ui.options(staffFor(role).map((e) => [e.id, e.name + (e.status === 'cuti' ? ' (cuti)' : '')]), r.performers[role], opt ? '— tanpa ' + C.ROLES[role].label.toLowerCase() + ' (bagian ke unit) —' : '— pilih ' + C.ROLES[role].label.toLowerCase() + ' —')}</select></label>`;
+            }).join('')}</div>` : ''}
             ${res ? `<div class="item-preview">${res.errors.length ? `<span class="text-danger small">${res.errors.map(u.esc).join(' ')}</span>` : res.shares.map((x) => `<span class="share-chip share-${x.category}">${u.esc(x.recipientName)}: <b>${u.rp(x.amount)}</b></span>`).join('')}${res.overrideFor ? ' <small class="muted">(pembagian khusus petugas)</small>' : ''}${res.warnings.length ? `<small class="block text-warning">${res.warnings.map(u.esc).join(' ')}</small>` : ''}</div>` : ''}
           </div>`;
         })
@@ -626,6 +645,8 @@
         drawRows();
       } else if (e.target.dataset.perf) {
         r.performers[e.target.dataset.perf] = e.target.value;
+        // pilihan "tanpa …" pada pelaksana opsional tidak diisi ulang otomatis
+        r.skipPerf = Object.assign({}, r.skipPerf, { [e.target.dataset.perf]: !e.target.value });
         if (e.target.value) lastPerf[e.target.dataset.perf] = e.target.value;
         drawRows();
       } else if (e.target.dataset.f === 'qty') {

@@ -74,6 +74,68 @@
     return { patients: ids.size, actions: qty + hcVisits.size };
   };
 
+  /* ---------- Laporan jasa per bagian (Konsultasi / Jasa tindakan / Homecare) ---------- */
+  const EXAM_RE = /PEMERIKSAAN DOKTER|KONSULTASI DOKTER|JASA DOKTER|BIAYA DOKTER|PERIKSA DOKTER/i;
+  inc.SECTIONS = { konsultasi: 'Konsultasi Dokter', jasa: 'Jasa Tindakan', homecare: 'Homecare' };
+  /** Bagian laporan untuk satu item: homecare, konsultasi (biaya pemeriksaan / resep), atau jasa tindakan. */
+  inc.sectionOf = function (t, it) {
+    if (NP.C.serviceGroup(it.category, it.serviceName) === 'homecare') return 'homecare';
+    if ((t.externalRef && /^RESEP:/.test(t.externalRef)) || (EXAM_RE.test(it.serviceName) && !/^POS:/.test(t.externalRef || ''))) return 'konsultasi';
+    return 'jasa';
+  };
+  /**
+   * Laporan jasa per pelaksana per bagian (meniru laporan "Dokter dan Bidan").
+   * @returns { emps:[{id,name}], rows:{konsultasi:[],jasa:[],homecare:[]}, totals:{section:{empId:amount}}, grand:{empId:amount} }
+   */
+  inc.jasaReport = function (trxs, opt) {
+    opt = opt || {};
+    const rows = { konsultasi: [], jasa: [], homecare: [] };
+    const empNames = new Map();
+    for (const t of trxs) {
+      if (t.status !== 'active' || !u.inRange(t.date, opt.start, opt.end)) continue;
+      for (const it of t.items) {
+        const amounts = {};
+        for (const sh of it.shares || []) {
+          if (!sh.recipientId || !(sh.type === 'role' || sh.type === 'employee') || !sh.amount) continue;
+          amounts[sh.recipientId] = (amounts[sh.recipientId] || 0) + sh.amount;
+          empNames.set(sh.recipientId, sh.recipientName);
+        }
+        const sec = inc.sectionOf(t, it);
+        rows[sec].push({
+          date: t.date, trxId: t.id, ref: (t.externalRef || '').replace(/^(POS|RESEP):/, ''), patient: t.patient || '', doctor: (it.performerNames || {}).dokter || '',
+          product: it.qty + ' Jasa x ' + it.serviceName + (it.withDoctor ? ' (dengan dokter)' : ''), qty: it.qty, price: it.price, gross: it.gross, amounts
+        });
+      }
+    }
+    const want = opt.employees ? new Set(opt.employees) : null;
+    const emps = [...empNames.entries()].filter(([id]) => !want || want.has(id)).map(([id, name]) => ({ id, name: (opt.empMap && opt.empMap.get(id) && opt.empMap.get(id).name) || name }));
+    const totals = {};
+    const grand = {};
+    for (const sec of Object.keys(rows)) {
+      rows[sec].sort((a, b) => (a.date + a.trxId).localeCompare(b.date + b.trxId));
+      totals[sec] = {};
+      for (const e of emps) {
+        totals[sec][e.id] = u.sum(rows[sec], (r) => r.amounts[e.id] || 0);
+        grand[e.id] = (grand[e.id] || 0) + totals[sec][e.id];
+      }
+    }
+    emps.sort((a, b) => (grand[b.id] || 0) - (grand[a.id] || 0));
+    return { emps, rows, totals, grand };
+  };
+  inc.jasaReportExcel = function (rep, label) {
+    const head = (extra) => extra.concat(rep.emps.map((e) => e.name));
+    const sheet = (sec, cols, rowFn) => ({
+      name: inc.SECTIONS[sec].toUpperCase().slice(0, 30),
+      aoa: [head(cols)].concat(rep.rows[sec].map((r, i) => rowFn(r, i).concat(rep.emps.map((e) => r.amounts[e.id] || 0))), [cols.map((c, i) => (i === 0 ? 'TOTAL' : '')).concat(rep.emps.map((e) => rep.totals[sec][e.id]))])
+    });
+    NP.exp.excel([
+      { name: 'Ringkasan', aoa: [['LAPORAN JASA DOKTER & BIDAN'], [label], [], ['Bagian'].concat(rep.emps.map((e) => e.name))].concat(Object.keys(inc.SECTIONS).map((sec) => [inc.SECTIONS[sec]].concat(rep.emps.map((e) => rep.totals[sec][e.id]))), [['TOTAL'].concat(rep.emps.map((e) => rep.grand[e.id]))]) },
+      sheet('konsultasi', ['No.', 'Tanggal', 'Kode Resep / Transaksi', 'Nama Pasien', 'Dokter', 'Service'], (r, i) => [i + 1, r.date, r.ref || r.trxId, r.patient, r.doctor, r.gross]),
+      sheet('jasa', ['No.', 'Tanggal', 'Struk / Transaksi', 'Pelanggan', 'Produk'], (r, i) => [i + 1, r.date, r.ref || r.trxId, r.patient || '-', r.product]),
+      sheet('homecare', ['No.', 'Tanggal', 'Struk / Transaksi', 'Pelanggan', 'Produk'], (r, i) => [i + 1, r.date, r.ref || r.trxId, r.patient || '-', r.product])
+    ], 'laporan-jasa-dokter-bidan-' + u.slug(label) + '.xlsx');
+  };
+
   /* ---------- Catatan shift & sesi praktik ---------- */
   inc.worklogs = async () => (await NP.db.all('worklogs')).sort((a, b) => b.date.localeCompare(a.date));
   inc.worklogSum = function (logs, empId, start, end) {
@@ -132,11 +194,12 @@
     const tabsHost = ui.$('#r-tabs', view);
     ui.tabs(tabsHost, [
       { key: 'recap', label: 'Rekap per Karyawan', icon: 'recap' },
+      { key: 'section', label: 'Laporan Dokter & Bidan', icon: 'report' },
       { key: 'recon', label: 'Rekonsiliasi', icon: 'check' },
       { key: 'work', label: 'Shift & Sesi Praktik', icon: 'calendar' }
     ], st.tab, (k) => {
       st.tab = k;
-      draw();
+      if (data) draw(); // data belum selesai dimuat → digambar setelah load()
     });
     const body = ui.$('#r-body', view);
     let data;
@@ -373,8 +436,25 @@
         };
     }
 
+    function sectionReport() {
+      const { start, end } = range();
+      const empMap = new Map(data.emps.map((e) => [e.id, e]));
+      const ids = data.emps.filter((e) => empFilter(e) && (st.role || ['dokter', 'bidan', 'perawat'].includes(C.roleOfPosition(e.position)))).map((e) => e.id);
+      return inc.jasaReport(data.trxs, { start, end, employees: ids, empMap });
+    }
+    function drawSection() {
+      const R = sectionReport();
+      body.innerHTML = R.emps.length
+        ? `<p class="muted small">Jasa per pelaksana dibagi menjadi <b>Konsultasi Dokter</b> (biaya pemeriksaan / resep), <b>Jasa Tindakan</b>, dan <b>Homecare</b> — sama dengan susunan laporan dokter & bidan. Periode ${u.esc(u.periodLabel(st.period))}.</p>
+          <div class="table-wrap"><table class="tbl"><thead><tr><th>Bagian</th>${R.emps.map((e) => `<th class="ta-right">${u.esc(e.name)}</th>`).join('')}</tr></thead>
+          <tbody>${Object.keys(inc.SECTIONS).map((sec) => `<tr><td>${inc.SECTIONS[sec]} <small class="muted">(${u.num(R.rows[sec].length)} baris)</small></td>${R.emps.map((e) => `<td class="ta-right" data-sec="${sec}" data-emp="${u.esc(e.id)}">${u.rp(R.totals[sec][e.id])}</td>`).join('')}</tr>`).join('')}</tbody>
+          <tfoot><tr><th>TOTAL</th>${R.emps.map((e) => `<th class="ta-right" data-grand="${u.esc(e.id)}">${u.rp(R.grand[e.id])}</th>`).join('')}</tr></tfoot></table></div>
+          <div class="form-actions"><button type="button" class="btn btn-primary" data-act="xls-section">${ui.icon('excel')}<span>Unduh laporan Excel (per bagian)</span></button></div>`
+        : ui.empty('Belum ada jasa dokter/bidan pada periode ini.');
+    }
     function draw() {
       if (st.tab === 'recap') drawRecap();
+      else if (st.tab === 'section') drawSection();
       else if (st.tab === 'recon') drawRecon();
       else drawWork();
     }
@@ -397,6 +477,7 @@
       const a = e.target.closest('[data-act]');
       if (!a || !view.contains(a)) return;
       if (a.dataset.act === 'detail') showDetail(a.dataset.id);
+      if (a.dataset.act === 'xls-section') inc.jasaReportExcel(sectionReport(), u.periodLabel(st.period));
       if (a.dataset.act === 'del-wl') {
         const runs = data.runs;
         const w = data.logs.find((x) => x.id === a.dataset.id);

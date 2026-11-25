@@ -128,7 +128,7 @@
       async services() {
         const [rows, rules] = await Promise.all([fetchAll('service_master'), fetchAll('service_revenue_rules')]);
         const byService = u.groupBy(rules, (r) => r.service_id);
-        const share = (r) => ({ type: r.recipient_type, target: r.target, mode: r.mode, value: r.mode === 'percent' ? num(r.value) : num(r.value) });
+        const share = (r) => Object.assign({ type: r.recipient_type, target: r.target, mode: r.mode, value: num(r.value) }, r.optional ? { optional: true } : {}, r.per_visit ? { perVisit: true } : {});
         return rows.map((s) => {
           const rs = (byService.get(s.id) || []).slice().sort((a, b) => a.sort_order - b.sort_order);
           const ov = new Map();
@@ -157,7 +157,7 @@
             shares: (allocBy.get(i.id) || []).sort((a, b) => a.sort_order - b.sort_order).map((a) => ({
               allocId: a.id, type: a.recipient_type, target: a.target, mode: a.mode, value: num(a.rule_value), recipientId: a.recipient_employee_id || a.recipient_unit || null,
               recipientName: a.recipient_name, category: a.category, role: a.recipient_type === 'role' ? a.target : a.recipient_type === 'employee' ? a.category : null,
-              unitAmount: num(a.unit_amount), amount: num(a.amount), implicit: a.is_implicit, payroll: pay(a)
+              unitAmount: num(a.unit_amount), amount: num(a.amount), implicit: a.is_implicit, perVisit: !!a.per_visit, payroll: pay(a)
             }))
           }));
           const doc = {

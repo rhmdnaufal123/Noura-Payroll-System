@@ -498,6 +498,76 @@ const today = () => new Date(Date.now() + 7 * 3600000).toISOString().slice(0, 10
     await rejects(as(U.admin, (c) => c.query("select * from public.compute_allocations('X', 1, 1, '{}')")), /permission denied/);
   });
 
+  console.log('Bagian opsional & per kunjungan');
+  await test('paritas SQL = JavaScript: pelaksana opsional & bagian per kunjungan (150 konfigurasi acak)', async () => {
+    const rnd = (() => {
+      let s = 4242;
+      return () => ((s = (s * 1103515245 + 12345) % 2147483648) / 2147483648);
+    })();
+    const c = await pool.connect();
+    try {
+      await c.query('begin');
+      const emps = { [E.bidan]: { id: E.bidan, name: 'Bd. Uji Satu', position: 'Bidan' }, [E.dokter]: { id: E.dokter, name: 'dr. Uji', position: 'Dokter Umum' } };
+      await c.query("select set_config('request.jwt.claims', $1, true)", [JSON.stringify({ sub: U.admin })]);
+      let compared = 0;
+      for (let n = 0; n < 150; n++) {
+        const price = 50000 + Math.floor(rnd() * 500000);
+        const qty = 1 + Math.floor(rnd() * 3);
+        const shares = [{ type: 'unit', target: 'KLINIK', mode: rnd() < 0.5 ? 'remainder' : 'nominal', value: 0 },
+          { type: 'role', target: 'dokter', mode: 'nominal', value: Math.floor(rnd() * price * 0.4), optional: rnd() < 0.3, perVisit: rnd() < 0.4 },
+          { type: 'role', target: 'bidan', mode: 'nominal', value: Math.floor(rnd() * price * 0.3), optional: rnd() < 0.5, perVisit: rnd() < 0.5 }];
+        const perf = {};
+        if (rnd() < 0.7) perf.dokter = E.dokter;
+        if (rnd() < 0.6) perf.bidan = E.bidan;
+        const paid = [];
+        if (rnd() < 0.3) paid.push('role:bidan');
+        if (rnd() < 0.2) paid.push('role:dokter');
+        const svc = { unit: 'KLINIK', price, shares };
+        const jsr = NP.rs.compute(svc, { price, qty, performers: perf, employees: emps, paid });
+        await c.query('savepoint s');
+        let sql;
+        try {
+          const id = (await c.query('select public.save_service($1) r', [{ name: 'Opsional ' + n, category: 'Dokter Umum & Bidan', unit: 'KLINIK', price, shares }])).rows[0].r;
+          sql = (await c.query('select * from public.compute_allocations($1, $2, $3, $4, false, false, $5)', [id, price, qty, perf, paid])).rows;
+        } catch (e) {
+          sql = { error: e.message };
+        }
+        await c.query('rollback to savepoint s');
+        if (jsr.errors.length) {
+          assert.ok(sql.error, 'JS error tapi SQL sukses: ' + JSON.stringify({ svc, perf, paid }));
+          continue;
+        }
+        assert.ok(!sql.error, 'SQL error: ' + (sql.error || '') + ' ' + JSON.stringify({ svc, perf, paid }));
+        assert.deepStrictEqual(sql.map((r) => [r.recipient_type, r.target, Number(r.unit_amount), Number(r.amount), r.is_implicit, r.per_visit]), jsr.shares.map((s) => [s.type, s.target, s.unitAmount, s.amount, s.implicit, !!s.perVisit && s.amount + s.unitAmount > 0 || (!!s.perVisit && paid.includes(NP.rs.visitKeyOf(s)) && s.type === 'role' && !!perf[s.target])]), JSON.stringify({ svc, perf, paid, qty }));
+        assert.strictEqual(sql.reduce((a, r) => a + Number(r.amount), 0), price * qty);
+        compared++;
+      }
+      assert.ok(compared > 100, 'dibandingkan: ' + compared);
+      await c.query('rollback');
+    } finally {
+      c.release();
+    }
+  });
+  await test('homecare: jasa bidan Rp100.000 sekali per kunjungan (transaksi), bidan opsional ke unit', async () => {
+    const ids = await as(U.admin, async (c) => ({
+      infus: await rpc(c, 'save_service', { name: 'Infus HC Uji', category: 'Homecare', unit: 'KLINIK', price: 380000, shares: [Un('KLINIK', 'remainder', 0), Object.assign(R('bidan', 'nominal', 100000), { perVisit: true })] }),
+      suntik: await rpc(c, 'save_service', { name: 'Suntik HC Uji', category: 'Homecare', unit: 'KLINIK', price: 300000, shares: [Un('KLINIK', 'remainder', 0), Object.assign(R('bidan', 'nominal', 100000), { perVisit: true })] }),
+      dok: await rpc(c, 'save_service', { name: 'Periksa Dokter HC Uji', category: 'Homecare', unit: 'KLINIK', price: 300000, shares: [R('dokter', 'nominal', 300000)] }),
+      kons: await rpc(c, 'save_service', { name: 'Konsultasi Resep Uji', category: 'Pemeriksaan dokter', unit: 'KLINIK', price: 100000, shares: [Un('KLINIK', 'remainder', 0), R('dokter', 'nominal', 80000), Object.assign(R('bidan', 'nominal', 15000), { optional: true })] })
+    }));
+    const t1 = await as(U.ops, (c) => rpc(c, 'create_service_transaction', { date: '2025-03-04', patient: 'Ny. HC', items: [
+      { serviceId: ids.infus, qty: 1, price: 380000, performers: { bidan: E.bidan } },
+      { serviceId: ids.suntik, qty: 2, price: 300000, performers: { bidan: E.bidan } },
+      { serviceId: ids.dok, qty: 1, price: 300000, performers: { dokter: E.dokter } }] }));
+    const by = async (id) => (await su('select category, sum(amount)::int a from public.service_transaction_allocations where transaction_id = $1 group by category having sum(amount) > 0 order by category', [id])).rows;
+    assert.deepStrictEqual(await by(t1), [{ category: 'bidan', a: 100000 }, { category: 'dokter', a: 300000 }, { category: 'klinik', a: 380000 + 600000 + 300000 - 100000 - 300000 }].sort((a, b) => a.category.localeCompare(b.category)));
+    const t2 = await as(U.ops, (c) => rpc(c, 'create_service_transaction', { date: '2025-03-04', items: [{ serviceId: ids.kons, qty: 1, price: 100000, performers: { dokter: E.dokter } }] }));
+    assert.deepStrictEqual(await by(t2), [{ category: 'dokter', a: 80000 }, { category: 'klinik', a: 20000 }]);
+    const t3 = await as(U.ops, (c) => rpc(c, 'create_service_transaction', { date: '2025-03-04', items: [{ serviceId: ids.kons, qty: 1, price: 100000, performers: { dokter: E.dokter, bidan: E.bidan } }] }));
+    assert.deepStrictEqual(await by(t3), [{ category: 'bidan', a: 15000 }, { category: 'dokter', a: 80000 }, { category: 'klinik', a: 5000 }]);
+    await rejects(as(U.admin, (c) => rpc(c, 'save_service', { name: 'Salah', category: 'Homecare', unit: 'KLINIK', price: 1000, shares: [Un('KLINIK', 'remainder', 0), Object.assign(R('bidan', 'percent', 10), { perVisit: true })] })), /rules_flags_chk|check constraint/);
+  });
+
   console.log('Hapus transaksi');
   await test('hapus beberapa transaksi: hanya admin, wajib alasan, yang sudah masuk penggajian dilewati, audit menyimpan salinan', async () => {
     const ids = (await su("select id from public.service_transactions where external_ref like 'SIN-%' and status = 'active' order by id")).rows.map((r) => r.id);
