@@ -170,3 +170,7 @@
 .tl-date { display: inline-block; width: auto; min-height: 34px; padding: 4px 8px; margin-left: 6px; font-size: 14px; font-weight: 600; vertical-align: middle; }
 .tbl tr.tl-sugg > td:first-child { box-shadow: inset 4px 0 0 var(--warning); }
 .wd-toggle:disabled { cursor: not-allowed; opacity: .6; }
+/* Riwayat transaksi: pilih & hapus beberapa */
+.h-bulk { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; padding: 8px 12px; margin-bottom: 10px; background: var(--surface-2); border: 1px solid var(--border); border-radius: 10px; font-size: 13px; }
+.h-bulk > span { flex: 1 1 220px; }
+.tbl input[data-sel], .tbl #h-selall { width: 18px; height: 18px; }

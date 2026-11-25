@@ -498,6 +498,28 @@ const today = () => new Date(Date.now() + 7 * 3600000).toISOString().slice(0, 10
     await rejects(as(U.admin, (c) => c.query("select * from public.compute_allocations('X', 1, 1, '{}')")), /permission denied/);
   });
 
+  console.log('Hapus transaksi');
+  await test('hapus beberapa transaksi: hanya admin, wajib alasan, yang sudah masuk penggajian dilewati, audit menyimpan salinan', async () => {
+    const ids = (await su("select id from public.service_transactions where external_ref like 'SIN-%' and status = 'active' order by id")).rows.map((r) => r.id);
+    assert.ok(ids.length >= 2);
+    await rejects(as(U.fin, (c) => rpc(c, 'delete_service_transactions', JSON.stringify(ids), 'uji')), /Akses ditolak/);
+    await rejects(as(U.admin, (c) => rpc(c, 'delete_service_transactions', JSON.stringify(ids), '')), /Alasan penghapusan wajib/);
+    const res = await as(U.admin, (c) => rpc(c, 'delete_service_transactions', JSON.stringify(ids.concat([T.gula, 'TRX-TIDAK-ADA'])), 'salah impor bulan Januari'));
+    assert.deepStrictEqual(res.deleted.sort(), ids.slice().sort());
+    assert.deepStrictEqual(res.skipped.map((x) => x.id).sort(), ['TRX-TIDAK-ADA', T.gula].sort());
+    assert.ok(/penggajian/.test(res.skipped.find((x) => x.id === T.gula).reason));
+    const left = (await su('select count(*)::int n from public.service_transactions where id = any($1)', [ids])).rows[0].n;
+    const leftItems = (await su('select count(*)::int n from public.service_transaction_items where transaction_id = any($1)', [ids])).rows[0].n;
+    const leftAlloc = (await su('select count(*)::int n from public.service_transaction_allocations where transaction_id = any($1)', [ids])).rows[0].n;
+    assert.deepStrictEqual([left, leftItems, leftAlloc], [0, 0, 0], 'item & alokasi ikut terhapus');
+    assert.strictEqual((await su('select count(*)::int n from public.service_transactions where id = $1', [T.gula])).rows[0].n, 1, 'transaksi dalam penggajian tetap ada');
+    const a = (await su("select detail, old_data from public.audit_logs where action = 'trx.delete' and entity_id = $1", [ids[0]])).rows[0];
+    assert.ok(/salah impor/.test(a.detail) && a.old_data.items.length >= 1 && a.old_data.id === ids[0], 'salinan transaksi di audit log');
+    // nomor struk yang dihapus dapat diimpor ulang
+    const r = await as(U.ops, (c) => rpc(c, 'create_service_transactions_bulk', bulk(['SIN-2'])));
+    assert.strictEqual(r.created.length, 1);
+  });
+
   await pool.end();
   console.log('\n' + passed + ' lulus, ' + failures.length + ' gagal');
   process.exit(failures.length ? 1 : 0);

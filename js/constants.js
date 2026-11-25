@@ -77,6 +77,30 @@
     return 'dokter_bidan';
   }
 
+  /** Kunci nama pasien: huruf besar tanpa tanda baca & sapaan (Tn., Ny., Nn., An., By., Sdr., Bpk., Ibu). */
+  const TITLES = new Set(['TN', 'NY', 'NN', 'AN', 'BY', 'SDR', 'SDRI', 'BPK', 'IBU', 'NONA', 'TUAN', 'NYONYA', 'ANAK', 'BAYI']);
+  function patientKey(s) {
+    const t = String(s == null ? '' : s).toUpperCase().replace(/[^A-Z0-9 ]/g, ' ').split(/\s+/).filter(Boolean);
+    while (t.length > 1 && TITLES.has(t[0])) t.shift();
+    return t.join(' ');
+  }
+  /** Kunjungan: pasien + tanggal bila nama pasien ada, selain itu transaksinya sendiri.
+   *  Homecare dihitung per kunjungan (1 pasien dengan banyak tindakan homecare = 1). */
+  function visitKey(t) {
+    const k = patientKey(t && t.patient);
+    return k ? 'P:' + k + '|' + t.date : 'T:' + ((t && (t.id || t.externalRef)) || '');
+  }
+  /** Jumlah "layanan": tindakan biasa dihitung per jumlah, homecare per kunjungan. rows: [{t, it}] */
+  function serviceCount(rows) {
+    let n = 0;
+    const visits = new Set();
+    for (const r of rows) {
+      if (serviceGroup(r.it.category, r.it.serviceName) === 'homecare') visits.add(visitKey(r.t));
+      else n += r.it.qty;
+    }
+    return n + visits.size;
+  }
+
   const EMP_STATUS = { aktif: 'Aktif', nonaktif: 'Tidak Aktif', cuti: 'Cuti', resign: 'Mengundurkan Diri' };
 
   /** Skema penggajian. useBase = memakai gaji pokok bulanan. fields = tarif honor yang relevan. */
@@ -109,7 +133,7 @@
 
   NP.C = {
     UNITS, EMP_UNITS, POSITIONS, ALL_POSITIONS, DEPARTMENTS, ROLES, ADMIN_POSITIONS, HEALTH_POSITIONS,
-    roleOfPosition, SHARE_CATS, SERVICE_CATEGORIES, SERVICE_GROUPS, serviceGroup, EMP_STATUS, PAY_SCHEMES, SCHEMES_BY_ROLE, RATE_LABELS, PTKP_LIST
+    roleOfPosition, SHARE_CATS, SERVICE_CATEGORIES, SERVICE_GROUPS, serviceGroup, patientKey, visitKey, serviceCount, EMP_STATUS, PAY_SCHEMES, SCHEMES_BY_ROLE, RATE_LABELS, PTKP_LIST
   };
   if (typeof module !== 'undefined' && module.exports) module.exports = NP;
 })(typeof globalThis !== 'undefined' ? globalThis : window);

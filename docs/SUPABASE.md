@@ -29,6 +29,7 @@ GitHub: source code, CI (uji otomatis), backup terenkripsi terjadwal, deploy Git
 | Backup berkala | Backup harian Supabase + `.github/workflows/db-backup.yml` (dump terenkripsi) |
 | Migrasi SQL | `supabase/migrations/` + `supabase/seed.sql` |
 | Pembagian dengan dokter / tanpa dokter | `service_revenue_rules.variant` (`standard`/`doctor`), `service_transaction_items.with_doctor` (snapshot), `compute_allocations(..., p_with_doctor)` |
+| Hapus transaksi (beberapa / sebulan) | `delete_service_transactions(p_ids jsonb, p_reason)` — admin saja, satu transaksi database, transaksi dalam penggajian dilewati, salinan di `audit_logs` |
 | Input bulanan / impor POS tanpa duplikasi | `create_service_transactions_bulk` (satu transaksi database) + `service_transactions.external_ref` unik (nomor struk POS) |
 | Konfigurasi non-sensitif di file environment | `.env` → `js/env.js` |
 | GitHub bukan database transaksi | GitHub hanya menyimpan kode & backup terenkripsi |

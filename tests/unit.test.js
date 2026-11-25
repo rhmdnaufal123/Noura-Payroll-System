@@ -325,6 +325,32 @@ console.log('Impor POS, input bulanan & analisis tindakan');
     assert.strictEqual(C.serviceGroup('Penjualan produk', 'Masker'), 'lainnya');
     assert.ok(C.SERVICE_CATEGORIES.includes('Dokter Umum & Bidan') && C.SERVICE_CATEGORIES.includes('Homecare'));
   });
+  test('homecare dihitung per kunjungan: 1 pasien banyak tindakan homecare = 1', () => {
+    const hc = (name, qty) => ({ serviceName: name, category: 'Homecare', qty });
+    const rows = [
+      { t: { id: 'T1', date: '2026-10-07', patient: 'Ny. ASTRI ANI' }, it: hc('INFUS MULTIVITAMIN HC', 1) },
+      { t: { id: 'T1', date: '2026-10-07', patient: 'Ny. ASTRI ANI' }, it: hc('PEMERIKSAAN DOKTER UMUM HC', 1) },
+      { t: { id: 'T2', date: '2026-10-07', patient: 'NY.ASTRI ANI' }, it: hc('SUNTIK MULTIVITAMIN HC', 2) }, // struk lain, pasien & hari sama
+      { t: { id: 'T3', date: '2026-10-12', patient: '' }, it: hc('INFUS MULTIVITAMIN HC', 1) }, // tanpa nama → per transaksi
+      { t: { id: 'T4', date: '2026-10-12', patient: '-' }, it: hc('PAKET PEMERIKSAAN HC', 1) },
+      { t: { id: 'T5', date: '2026-10-12', patient: 'Tn. Lain' }, it: { serviceName: 'Suntik KB', category: 'Dokter Umum & Bidan', qty: 3 } }
+    ];
+    assert.strictEqual(C.serviceCount(rows.slice(0, 3)), 1);
+    assert.strictEqual(C.serviceCount(rows), 1 + 2 + 3);
+    assert.strictEqual(C.visitKey(rows[0].t), C.visitKey(rows[2].t));
+  });
+  test('honor per tindakan / per pasien: homecare pasien yang sama pada hari yang sama dihitung 1', () => {
+    js('service-income.js');
+    const T = (id, date, patient, items) => ({ id, date, patient, status: 'active', items });
+    const hc = (n) => ({ serviceName: n, category: 'Homecare', qty: 1, performers: { perawat: 'E1' } });
+    const r = NP.income.performed([
+      T('A', '2026-10-07', 'Ny. X', [hc('INFUS HC'), hc('PERIKSA HC')]),
+      T('B', '2026-10-07', 'ny x', [hc('SUNTIK HC')]),
+      T('C', '2026-10-08', '', [{ serviceName: 'Suntik KB', category: 'Tindakan kebidanan', qty: 2, performers: { perawat: 'E1' } }]),
+      T('D', '2026-10-08', 'Tn. Y', [hc('INFUS HC')])
+    ], 'E1', '2026-10-01', '2026-10-31');
+    assert.deepStrictEqual(r, { patients: 3, actions: 4 });
+  });
   test('tabel bulanan: satu transaksi per tanggal terisi, maks. 50 tindakan per transaksi', () => {
     const svcMap = new Map(services.map((s) => [s.id, s]));
     const empMap = new Map(emps.map((e) => [e.id, e]));
@@ -358,13 +384,20 @@ console.log('Impor POS, input bulanan & analisis tindakan');
     assert.deepStrictEqual([A.byService[0].name, A.byService[0].qty, A.byService[0].gross], ['Suntik Multivitamin', 8, 1760000]);
     const hc = NP.analysis.build(trxs, { start: '2026-10-01', end: '2026-10-31', group: 'homecare' });
     assert.deepStrictEqual([hc.total.qty, hc.total.gross, hc.byService.length], [5, 1510000, 4]);
+    // homecare per kunjungan pasien (nama & tanggal, atau per struk bila tanpa nama)
+    const visits = new Set();
+    for (const t of trxs.filter((x) => x.status === 'active')) if (t.items.some((i) => i.category === 'Homecare')) visits.add(C.visitKey(t));
+    const hcg = A.byGroup.find((x) => x.key === 'homecare');
+    assert.deepStrictEqual([hcg.qty, hcg.count], [5, visits.size]);
+    assert.strictEqual(A.total.count, 47 + visits.size);
+    assert.strictEqual(u.sum(A.trend.series.homecare, (x) => x.qty), visits.size);
     const bidan = A.byPerformer.find((p) => p.key === 'KRY-0002');
     assert.deepStrictEqual([bidan.qty, bidan.fee], [2, 40000]);
     assert.strictEqual(A.byPatient.length, F.expect.withPatient);
     const q = NP.analysis.build(trxs, { start: '2026-10-01', end: '2026-10-31', q: 'suntik kb' });
     assert.strictEqual(q.total.qty, 2);
     assert.ok(A.trend.daily && A.trend.buckets.length === 31);
-    assert.strictEqual(u.sum(A.trend.series.homecare, (x) => x.qty), 5);
+
   });
 }
 
@@ -462,6 +495,14 @@ console.log('Impor biaya dokter (penebusan resep)');
     // mode lain tetap tersedia
     const never = NP.pos.plan(lines, svcs, emps, Object.assign({}, opt, { doctorMode: 'never' }));
     assert.ok(never.transactions.every((t) => t.items.every((i) => !i.withDoctor)));
+  });
+  test('rencana resep: tindakan yang juga memberi bagian bidan memakai bidan pelaksana bawaan', () => {
+    const feeB = Object.assign({}, fee, { shares: fee.shares.concat([{ type: 'role', target: 'bidan', mode: 'nominal', value: 10000 }]) });
+    const P1 = NP.resep.plan(rx.rows, Object.assign({}, base, { service: feeB }));
+    assert.ok(P1.blocking.length && /Bidan pelaksana belum dipilih — pilih di bagian 3/.test(P1.blocking[0].problems.join(' ')));
+    const P2 = NP.resep.plan(rx.rows, Object.assign({}, base, { service: feeB, defaults: { bidan: 'KRY-0100' } }));
+    assert.deepStrictEqual(P2.blocking, []);
+    assert.ok(P2.transactions.every((t) => t.items[0].performers.bidan === 'KRY-0100' && t.items[0].performers.dokter === 'KRY-0009'));
   });
   test('saran tindakan: "Pemeriksaan Dokter" dipilih, versi Homecare tidak', () => {
     const list = [{ id: 'A', name: 'Pemeriksaan Dokter Umum HC', category: 'Homecare', price: 300000, active: true }, { id: 'B', name: 'Pemeriksaan Dokter', category: 'Dokter Umum & Bidan', price: 100000, active: true }, { id: 'C', name: 'Suntik KB', category: 'Tindakan kebidanan', price: 65000, active: true }];

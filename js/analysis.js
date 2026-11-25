@@ -34,14 +34,18 @@
         const k = keyFn(r);
         if (k == null) continue;
         let x = m.get(k);
-        if (!x) m.set(k, (x = Object.assign({ key: k, qty: 0, gross: 0, trx: new Set() }, init(r))));
+        if (!x) m.set(k, (x = Object.assign({ key: k, qty: 0, gross: 0, trx: new Set(), rows: [] }, init(r))));
         x.qty += r.it.qty;
         x.gross += r.it.gross;
         x.trx.add(r.t.id);
+        x.rows.push(r);
       }
-      return [...m.values()].map((x) => Object.assign(x, { trx: x.trx.size }));
+      // count = jumlah layanan: tindakan biasa per jumlah, homecare per kunjungan pasien
+      return [...m.values()].map((x) => Object.assign(x, { trx: x.trx.size, count: C.serviceCount(x.rows), visits: new Set(x.rows.filter((r) => r.group === 'homecare').map((r) => C.visitKey(r.t))).size, rows: undefined }));
     };
-    const total = { qty: u.sum(rows, (r) => r.it.qty), gross: u.sum(rows, (r) => r.it.gross), trx: new Set(rows.map((r) => r.t.id)).size, patients: new Set(rows.map((r) => normName(r.t.patient)).filter(Boolean)).size };
+    const total = { qty: u.sum(rows, (r) => r.it.qty), count: C.serviceCount(rows), gross: u.sum(rows, (r) => r.it.gross), trx: new Set(rows.map((r) => r.t.id)).size, patients: new Set(rows.map((r) => normName(r.t.patient)).filter(Boolean)).size };
+    total.hcVisits = new Set(rows.filter((r) => r.group === 'homecare').map((r) => C.visitKey(r.t))).size;
+    total.hcQty = u.sum(rows.filter((r) => r.group === 'homecare'), (r) => r.it.qty);
     const byGroup = agg((r) => r.group, (r) => ({ label: C.SERVICE_GROUPS[r.group] })).sort((a, b) => GROUP_SLOT[a.key] - GROUP_SLOT[b.key]);
     const byCategory = agg((r) => r.it.category, (r) => ({ label: r.it.category, group: r.group })).sort((a, b) => GROUP_SLOT[a.group] - GROUP_SLOT[b.group] || b.qty - a.qty);
     const byService = agg((r) => normName(r.it.serviceName), (r) => ({ name: r.it.serviceName, category: r.it.category, group: r.group })).sort((a, b) => b.qty - a.qty || b.gross - a.gross);
@@ -62,8 +66,9 @@
     const perf = new Map();
     for (const r of rows) for (const p of r.performers) {
       const k = p.id || p.name;
-      const x = perf.get(k) || { key: k, name: p.name, roles: new Set(), qty: 0, gross: 0, fee: 0, trx: new Set(), groups: {} };
+      const x = perf.get(k) || { key: k, name: p.name, roles: new Set(), qty: 0, gross: 0, fee: 0, trx: new Set(), groups: {}, rows: [] };
       x.roles.add(p.role);
+      x.rows.push(r);
       x.qty += r.it.qty;
       x.gross += r.it.gross;
       x.trx.add(r.t.id);
@@ -71,7 +76,16 @@
       x.fee += u.sum((r.it.shares || []).filter((s) => s.recipientId && s.recipientId === p.id), (s) => s.amount);
       perf.set(k, x);
     }
-    const byPerformer = [...perf.values()].map((x) => Object.assign(x, { roles: [...x.roles], trx: x.trx.size })).sort((a, b) => b.qty - a.qty);
+    const byPerformer = [...perf.values()]
+      .map((x) => {
+        const groups = {};
+        for (const g of Object.keys(C.SERVICE_GROUPS)) {
+          const rs_ = x.rows.filter((r) => r.group === g);
+          if (rs_.length) groups[g] = C.serviceCount(rs_);
+        }
+        return Object.assign(x, { roles: [...x.roles], trx: x.trx.size, count: C.serviceCount(x.rows), groups, rows: undefined });
+      })
+      .sort((a, b) => b.count - a.count);
     // tren: harian bila ≤ 62 hari, selain itu bulanan
     const daysSpan = Math.round((u.parseISO(f.end) - u.parseISO(f.start)) / 86400000) + 1;
     const daily = daysSpan <= 62;
@@ -81,10 +95,17 @@
     const idx = new Map(buckets.map((b, i) => [b, i]));
     const trend = {};
     for (const g of Object.keys(C.SERVICE_GROUPS)) trend[g] = buckets.map(() => ({ qty: 0, gross: 0 }));
+    const hcSeen = buckets.map(() => new Set());
     for (const r of rows) {
       const i = idx.get(daily ? r.t.date : r.t.date.slice(0, 7));
       if (i === undefined) continue;
-      trend[r.group][i].qty += r.it.qty;
+      if (r.group === 'homecare') {
+        const k = C.visitKey(r.t);
+        if (!hcSeen[i].has(k)) {
+          hcSeen[i].add(k);
+          trend.homecare[i].qty += 1; // homecare: per kunjungan pasien
+        }
+      } else trend[r.group][i].qty += r.it.qty;
       trend[r.group][i].gross += r.it.gross;
     }
     return { rows, total, withDoctorQty, byGroup, byCategory, byService, byPatient, byPerformer, trend: { daily, buckets, series: trend } };
@@ -156,7 +177,7 @@
       const groupsShown = A.byGroup.length ? A.byGroup : [];
       body.innerHTML = `
         <div class="stats-row">
-          ${ui.stat('Jumlah tindakan', u.num(T.qty), { icon: 'medical', sub: delta(T.qty, P.total.qty) })}
+          ${ui.stat('Jumlah tindakan', u.num(T.count), { icon: 'medical', sub: delta(T.count, P.total.count) + (T.hcVisits ? `<small class="block muted">homecare dihitung per kunjungan (${u.num(T.hcVisits)} kunjungan, ${u.num(T.hcQty)} tindakan)</small>` : '') })}
           ${ui.stat('Pendapatan kotor', u.rp(T.gross), { icon: 'wallet', sub: delta(T.gross, P.total.gross, true) })}
           ${ui.stat('Transaksi', u.num(T.trx), { icon: 'input', sub: T.trx ? 'rata-rata ' + u.rp(Math.round(T.gross / T.trx)) + ' / transaksi' : '' })}
           ${ui.stat('Pasien bernama', u.num(T.patients), { icon: 'users', sub: 'nama pasien yang tercatat' })}
@@ -164,13 +185,14 @@
         <div class="an-groups">${Object.keys(C.SERVICE_GROUPS)
           .filter((g) => st.group === 'ALL' || st.group === g)
           .map((g) => {
-            const x = groupsShown.find((y) => y.key === g) || { qty: 0, gross: 0, trx: 0 };
-            const pr = P.byGroup.find((y) => y.key === g) || { qty: 0, gross: 0 };
+            const x = groupsShown.find((y) => y.key === g) || { qty: 0, count: 0, gross: 0, trx: 0 };
+            const pr = P.byGroup.find((y) => y.key === g) || { qty: 0, count: 0, gross: 0 };
+            const hc = g === 'homecare';
             return `<button type="button" class="card an-group ${st.group === g ? 'active' : ''}" data-group="${g}" style="--gc:${groupColor(g)}">
               <span class="an-group-name"><i class="dot" style="background:${groupColor(g)}"></i>${u.esc(C.SERVICE_GROUPS[g])}</span>
-              <b>${u.num(x.qty)} <small>tindakan</small></b>
-              <span>${u.rp(x.gross)} · ${T.qty ? u.pct((x.qty / T.qty) * 100) : '0%'} dari jumlah</span>
-              <small>${delta(x.qty, pr.qty)}</small>
+              <b>${u.num(x.count)} <small>${hc ? 'kunjungan' : 'tindakan'}</small></b>
+              <span>${hc && x.qty !== x.count ? u.num(x.qty) + ' tindakan · ' : ''}${u.rp(x.gross)} · ${T.count ? u.pct((x.count / T.count) * 100) : '0%'} dari jumlah</span>
+              <small>${delta(x.count, pr.count)}</small>
             </button>`;
           })
           .join('')}</div>
@@ -209,7 +231,7 @@
       ui.table(ui.$('#an-cat', body), {
         columns: [
           { key: 'label', label: 'Kategori', render: (c) => `<b>${u.esc(c.label)}</b><small class="block">${grpBadge(c.group)}</small>` },
-          { key: 'qty', label: 'Jumlah', align: 'right', render: (c) => u.num(c.qty) + `<small class="block muted">${pct(c.qty, T.qty)}</small>` },
+          { key: 'qty', label: 'Jumlah', align: 'right', render: (c) => u.num(c.count) + (c.group === 'homecare' ? ' kunjungan' : '') + `<small class="block muted">${c.group === 'homecare' && c.qty !== c.count ? u.num(c.qty) + ' tindakan · ' : ''}${pct(c.count, T.count)}</small>` },
           { key: 'gross', label: 'Pendapatan', align: 'right', render: (c) => u.rp(c.gross) }
         ],
         rows: A.byCategory,
@@ -220,7 +242,7 @@
       ui.table(ui.$('#an-perf', body), {
         columns: [
           { key: 'name', label: 'Pelaksana', render: (p) => `<b>${u.esc(p.name)}</b><small class="block muted">${p.roles.map((r) => (C.ROLES[r] || {}).label || r).join(', ')}</small>` },
-          { key: 'qty', label: 'Tindakan', align: 'right', render: (p) => u.num(p.qty) + `<small class="block muted">${Object.entries(p.groups).map(([g, n]) => u.esc(C.SERVICE_GROUPS[g]) + ' ' + n).join(' · ')}</small>` },
+          { key: 'qty', label: 'Tindakan', align: 'right', render: (p) => u.num(p.count) + `<small class="block muted">${Object.entries(p.groups).map(([g, n]) => u.esc(C.SERVICE_GROUPS[g]) + ' ' + n + (g === 'homecare' ? ' kunjungan' : '')).join(' · ')}</small>`, value: (p) => p.count },
           { key: 'gross', label: 'Pendapatan', align: 'right', render: (p) => u.rp(p.gross) },
           { key: 'fee', label: 'Jasa diterima', align: 'right', render: (p) => u.rp(p.fee) }
         ],
@@ -262,7 +284,7 @@
               mode: 'index', intersect: false, filter: (c) => c.parsed.y > 0,
               callbacks: {
                 title: (it) => (A.trend.daily ? u.fmtDate(A.trend.buckets[it[0].dataIndex], 'long') : u.periodLabel(A.trend.buckets[it[0].dataIndex])),
-                label: (c) => ' ' + c.dataset.label + ': ' + u.num(c.parsed.y) + ' tindakan · ' + u.rp(c.dataset.gross[c.dataIndex]),
+                label: (c) => ' ' + c.dataset.label + ': ' + u.num(c.parsed.y) + (c.dataset.label === C.SERVICE_GROUPS.homecare ? ' kunjungan · ' : ' tindakan · ') + u.rp(c.dataset.gross[c.dataIndex]),
                 footer: (it) => (it.length > 1 ? 'Total: ' + u.num(u.sum(it, (x) => x.parsed.y)) + ' tindakan' : '')
               }
             }
@@ -312,10 +334,10 @@
       if (!a) return;
       const grp = st.group === 'ALL' ? 'semua' : C.SERVICE_GROUPS[st.group];
       NP.exp.excel([
-        { name: 'Ringkasan', aoa: [['ANALISIS TINDAKAN'], [label() + ' · kelompok ' + grp + (st.unit !== 'ALL' ? ' · ' + C.UNITS[st.unit].name : '') + (st.q ? ' · cari "' + st.q + '"' : '')], [], ['Kelompok', 'Jumlah tindakan', 'Transaksi', 'Pendapatan kotor']].concat(A.byGroup.map((g) => [g.label, g.qty, g.trx, g.gross]), [['TOTAL', A.total.qty, A.total.trx, A.total.gross]]) },
+        { name: 'Ringkasan', aoa: [['ANALISIS TINDAKAN'], [label() + ' · kelompok ' + grp + (st.unit !== 'ALL' ? ' · ' + C.UNITS[st.unit].name : '') + (st.q ? ' · cari "' + st.q + '"' : '')], [], ['Kelompok', 'Jumlah (homecare per kunjungan)', 'Jumlah tindakan', 'Transaksi', 'Pendapatan kotor']].concat(A.byGroup.map((g) => [g.label, g.count, g.qty, g.trx, g.gross]), [['TOTAL', A.total.count, A.total.qty, A.total.trx, A.total.gross]]) },
         { name: 'Per Tindakan', rows: A.byService.map((s) => ({ 'Nama Tindakan': s.name, Kelompok: C.SERVICE_GROUPS[s.group], Kategori: s.category, Jumlah: s.qty, 'Dengan Dokter': s.wdQty, 'Tanpa Dokter': s.qty - s.wdQty, Transaksi: s.trx, 'Harga Rata-rata': s.avg, Pendapatan: s.gross })) },
-        { name: 'Per Kategori', rows: A.byCategory.map((c) => ({ Kategori: c.label, Kelompok: C.SERVICE_GROUPS[c.group], Jumlah: c.qty, Transaksi: c.trx, Pendapatan: c.gross })) },
-        { name: 'Per Pelaksana', rows: A.byPerformer.map((p) => ({ Pelaksana: p.name, Peran: p.roles.map((r) => (C.ROLES[r] || {}).label || r).join(', '), Tindakan: p.qty, Transaksi: p.trx, Pendapatan: p.gross, 'Jasa Diterima': p.fee })) },
+        { name: 'Per Kategori', rows: A.byCategory.map((c) => ({ Kategori: c.label, Kelompok: C.SERVICE_GROUPS[c.group], Jumlah: c.count, 'Jumlah Tindakan': c.qty, Transaksi: c.trx, Pendapatan: c.gross })) },
+        { name: 'Per Pelaksana', rows: A.byPerformer.map((p) => ({ Pelaksana: p.name, Peran: p.roles.map((r) => (C.ROLES[r] || {}).label || r).join(', '), Tindakan: p.count, Transaksi: p.trx, Pendapatan: p.gross, 'Jasa Diterima': p.fee })) },
         { name: 'Per Pasien', rows: A.byPatient.map((p) => ({ Pasien: p.name, Kunjungan: p.trx, Tindakan: [...p.services.entries()].map(([n, q]) => n + (q > 1 ? ' x' + q : '')).join(', '), Jumlah: p.qty, Total: p.gross, Terakhir: p.last })) },
         { name: 'Tren', rows: A.trend.buckets.map((b, i) => Object.assign({ [A.trend.daily ? 'Tanggal' : 'Bulan']: b }, ...Object.keys(C.SERVICE_GROUPS).map((g) => ({ [C.SERVICE_GROUPS[g] + ' (jumlah)']: A.trend.series[g][i].qty, [C.SERVICE_GROUPS[g] + ' (Rp)']: A.trend.series[g][i].gross })))) },
         { name: 'Detail', rows: A.rows.map((r) => ({ Tanggal: r.t.date, 'No. Transaksi': r.t.id, Pasien: r.t.patient, Tindakan: r.it.serviceName, 'Dengan Dokter': r.it.withDoctor ? 'Ya' : 'Tidak', Kelompok: C.SERVICE_GROUPS[r.group], Kategori: r.it.category, Unit: (C.UNITS[r.it.unit] || {}).name || r.it.unit, Jumlah: r.it.qty, Harga: r.it.price, Subtotal: r.it.gross, Pelaksana: r.performers.map((p) => p.name).join(', '), Catatan: r.t.note })) }

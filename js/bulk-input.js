@@ -404,10 +404,13 @@
     const groupTot = {};
     for (const t of P.transactions) for (const i of t.items) {
       const g = C.serviceGroup(i.category, i.serviceName);
-      const x = groupTot[g] || (groupTot[g] = { qty: 0, gross: 0 });
+      const x = groupTot[g] || (groupTot[g] = { qty: 0, gross: 0, visits: new Set() });
       x.qty += i.qty;
       x.gross += i.qty * i.price;
+      if (g === 'homecare') x.visits.add(C.visitKey({ patient: t.patient, date: t.date, id: t.externalRef }));
     }
+    // homecare dihitung per kunjungan pasien
+    for (const x of Object.values(groupTot)) x.count = x.visits && x.visits.size ? x.visits.size : x.qty;
     for (const x of P.unmatched) {
       const g = C.serviceGroup(x.category, x.name);
       const y = groupTot[g] || (groupTot[g] = { qty: 0, gross: 0 });
@@ -450,7 +453,7 @@
           ${ui.stat('Transaksi baru', u.num(fresh.length), { icon: 'input', sub: already ? u.num(already) + ' struk sudah pernah diimpor (dilewati)' : 'struk berisi tindakan' })}
           ${ui.stat('Tindakan', u.num(u.sum(fresh, (t) => t.qty)), { icon: 'medical', sub: P.unmatched.length ? u.num(u.sum(P.unmatched, (x) => x.qty)) + ' belum ada di master' : 'semua cocok dengan master' })}
           ${ui.stat('Pendapatan kotor', u.rp(u.sum(fresh, (t) => t.gross)), { icon: 'wallet' })}
-          ${Object.keys(C.SERVICE_GROUPS).filter((g) => groupTot[g]).map((g) => ui.stat(C.SERVICE_GROUPS[g], u.num(groupTot[g].qty) + ' tindakan', { icon: g === 'homecare' ? 'users' : 'medical', sub: u.rp(groupTot[g].gross) + (groupTot[g].unmatched ? ' · +' + groupTot[g].unmatched + ' belum di master' : '') })).join('')}
+          ${Object.keys(C.SERVICE_GROUPS).filter((g) => groupTot[g]).map((g) => ui.stat(C.SERVICE_GROUPS[g], u.num(groupTot[g].count != null ? groupTot[g].count : groupTot[g].qty) + (g === 'homecare' ? ' kunjungan' : ' tindakan'), { icon: g === 'homecare' ? 'users' : 'medical', sub: (g === 'homecare' && groupTot[g].qty && groupTot[g].count !== groupTot[g].qty ? u.num(groupTot[g].qty) + ' tindakan · ' : '') + u.rp(groupTot[g].gross) + (groupTot[g].unmatched ? ' · +' + groupTot[g].unmatched + ' belum di master' : '') })).join('')}
         </div>
         ${problems.length ? `<div class="alert alert-warning">${ui.icon('warn')}<div><b>Perlu diperbaiki sebelum impor:</b><ul>${[...new Set(problems.map((p) => p.msg))].slice(0, 8).map((m) => `<li>${u.esc(m)}</li>`).join('')}</ul></div></div>` : ''}
         <div id="pos-table"></div>
@@ -599,7 +602,7 @@
   }
 
   /* ===================== Impor biaya dokter (file Penebusan Resep) ===================== */
-  const rx = { file: null, parsed: null, doctors: null, docMap: {}, serviceId: '', excluded: new Set(), included: new Set(), onlyFlagged: false };
+  const rx = { file: null, parsed: null, doctors: null, docMap: {}, serviceId: '', defaults: {}, excluded: new Set(), included: new Set(), onlyFlagged: false };
   const shortCode = (c) => String(c).replace(/^Resep\//i, '');
 
   async function renderResep(outer) {
@@ -663,7 +666,13 @@
       rx.serviceId = sg ? sg.id : '';
     }
     const service = services.find((x) => x.id === rx.serviceId) || null;
-    const P = NP.resep.plan(rx.parsed.rows, { doctors: rx.doctors, docMap: rx.docMap, service, services, employees, kasirLines: pos.parsed ? pos.parsed.lines : null, trxs, excluded: rx.excluded, included: rx.included });
+    // pelaksana selain dokter yang dibutuhkan pembagian tindakan (mis. bidan) → pilih pelaksana bawaan
+    const otherRoles = service ? rs.requiredRoles(service, rs.effectiveWithDoctor(service, true)).filter((role) => role !== 'dokter') : [];
+    for (const role of otherRoles) {
+      const staff = staffFor(employees, role);
+      if (!rx.defaults[role] && staff.length === 1) rx.defaults[role] = staff[0].id;
+    }
+    const P = NP.resep.plan(rx.parsed.rows, { doctors: rx.doctors, docMap: rx.docMap, defaults: rx.defaults, service, services, employees, kasirLines: pos.parsed ? pos.parsed.lines : null, trxs, excluded: rx.excluded, included: rx.included });
     // transaksi pasien yang diperiksa dokter (service > 0) tetapi tindakannya tercatat TANPA dokter
     const toFix = [];
     for (const x of P.rows) if (x.service > 0) for (const d of x.db) if (d.noDoctor.length && !toFix.some((f) => f.id === d.id)) toFix.push({ id: d.id, empId: x.empId, patient: x.patient, items: d.noDoctor });
@@ -691,6 +700,10 @@
           <label class="field"><span>Master tindakan <b class="req">*</b></span><select data-rxsvc>${svcOpts}</select></label>
           <div class="field"><span>Pembagian</span>${service ? `<div class="share-chips">${NP.svc.shareSummary(service, empMap, rs.hasDoctorVariant(service) ? service.doctorShares : null)}</div><small class="muted">${rs.hasDoctorVariant(service) ? 'Memakai pembagian <b>dengan dokter</b>.' : ''} Harga tiap transaksi mengikuti kolom Service di file.</small>` : '<small class="muted">Pilih tindakan.</small>'}</div>
         </div>
+        ${otherRoles.length ? `<div class="rx-roles">
+          <p class="muted small">Pembagian tindakan <b>${u.esc(service.name)}</b> juga memberi bagian untuk ${otherRoles.map((role) => '<b>' + u.esc(C.ROLES[role].label.toLowerCase()) + '</b>').join(' dan ')}. Pilih pelaksananya (dipakai untuk semua resep), atau hapus bagian tersebut di Master Tindakan bila tidak diperlukan.</p>
+          <div class="grid-3">${otherRoles.map((role) => `<label class="field"><span>${C.ROLES[role].label} pelaksana <b class="req">*</b></span><select data-rxdef="${role}">${ui.options(staffFor(employees, role).map((e) => [e.id, e.name]), rx.defaults[role], '— pilih ' + C.ROLES[role].label.toLowerCase() + ' —')}</select>${!staffFor(employees, role).length && NP.emp.PRESETS[role] && NP.sec.can('employees.edit') ? `<a class="small" href="#/employees?add=${role}">+ Tambah ${C.ROLES[role].label.toLowerCase()} di Data Karyawan</a>` : ''}</label>`).join('')}</div>
+        </div>` : ''}
         ${!service ? `<div class="alert alert-info">${ui.icon('info')}<div>Belum ada tindakan "Pemeriksaan Dokter" di Master Tindakan. ${canMaster ? 'Buat sekarang lalu atur pembagian jasa dokternya di Master Tindakan sebelum mengimpor.' : 'Minta Administrator membuatnya di Master Tindakan.'}</div>${canMaster ? `<button type="button" class="btn btn-sm btn-primary" data-rx="create-fee">${ui.icon('plus')}<span>Buat "Biaya Pemeriksaan Dokter"</span></button>` : ''}</div>` : ''}
       </div>
       <div class="card">
@@ -743,6 +756,9 @@
       } else if (t.dataset.docmap !== undefined) {
         rx.docMap[t.dataset.docmap] = t.value;
         if (t.value) rx.doctors.add(t.dataset.docmap);
+      } else if (t.dataset.rxdef) {
+        if (t.value) rx.defaults[t.dataset.rxdef] = t.value;
+        else delete rx.defaults[t.dataset.rxdef];
       } else if (t.hasAttribute('data-rxsvc')) {
         rx.serviceId = t.value;
       } else if (t.dataset.inc !== undefined) {

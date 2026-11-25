@@ -91,6 +91,7 @@
     'trx.editAny': AF,
     'trx.editOwn': AFO,
     'trx.cancel': AF,
+    'trx.delete': A,
     'revenue.view': AFV,
     'analysis.view': ALL,
     'income.view': AF,

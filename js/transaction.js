@@ -320,6 +320,42 @@
       .map((i) => ({ lineId: i.lineId, serviceName: i.serviceName, reason, doctorId }));
   };
 
+  /** Dapat dihapus permanen? Tidak bila sudah masuk penggajian atau memiliki koreksi. */
+  trx.deletable = (t) => !trx.empShares(t).some((x) => x.share.payroll && (x.share.payroll.state || x.share.payroll.runId)) && !(t.adjustments || []).length;
+
+  /**
+   * Hapus permanen beberapa transaksi (Administrator). Transaksi yang sudah masuk penggajian /
+   * memiliki koreksi dilewati. @returns {{deleted:string[], skipped:[{id, reason}], gross:number}}
+   */
+  trx.removeMany = async function (ids, reason) {
+    if (!NP.sec.can('trx.delete')) throw new Error('Hanya Administrator yang dapat menghapus transaksi.');
+    if (!reason || reason.trim().length < 3) throw new Error('Alasan penghapusan wajib diisi (min. 3 karakter).');
+    if (!ids || !ids.length) throw new Error('Tidak ada transaksi yang dipilih.');
+    if (NP.db.remote) {
+      const r = await NP.db.deleteTransactions(ids, reason.trim());
+      return { deleted: r.deleted || [], skipped: r.skipped || [], gross: Number(r.gross) || 0 };
+    }
+    return NP.db.run(['transactions', 'auditLog'], async (t) => {
+      const res = { deleted: [], skipped: [], gross: 0 };
+      for (const id of ids) {
+        const cur = await t.get('transactions', id);
+        if (!cur) {
+          res.skipped.push({ id, reason: 'tidak ditemukan' });
+          continue;
+        }
+        if (!trx.deletable(cur)) {
+          res.skipped.push({ id, reason: 'sudah masuk penggajian atau memiliki koreksi' });
+          continue;
+        }
+        await t.del('transactions', id);
+        res.deleted.push(id);
+        res.gross += cur.totals.gross;
+        await t.put('auditLog', NP.audit.entry('trx.delete', 'transaction', id, 'Hapus transaksi ' + id + ' (' + cur.date + ', ' + u.rp(cur.totals.gross) + '): ' + reason.trim(), { before: cur }));
+      }
+      return res;
+    });
+  };
+
   /** Batalkan transaksi. Transaksi terkunci memerlukan otorisasi (opt.auth) dan menghasilkan adjustment negatif. */
   trx.cancel = async function (id, reason, opt) {
     opt = opt || {};
@@ -874,12 +910,15 @@
           <select id="h-pay">${ui.options([['', 'Semua status gaji'], ['open', 'Belum diproses'], ['inrun', 'Dalam proses gaji'], ['paid', 'Terkunci'], ['partial', 'Sebagian'], ['none', 'Tanpa jasa']], hs.pay)}</select>
         </div>
         <div class="stats-row compact" id="h-stats"></div>
+        <div id="h-bulk"></div>
         <div id="h-list"></div>
       </div>`;
     let all = await trx.all();
     let table;
     const canEditAny = NP.sec.can('trx.editAny');
+    const canDelete = NP.sec.can('trx.delete');
     const usr = NP.sec.user();
+    const sel = new Set(); // transaksi yang dicentang
 
     function rowsOf() {
       const q = hs.q.toLowerCase();
@@ -911,6 +950,9 @@
       ].join('');
     }
     const cols = [
+      ...(canDelete
+        ? [{ key: 'sel', label: '<input type="checkbox" id="h-selall" aria-label="Pilih semua transaksi pada filter">', sortable: false, render: (r) => `<input type="checkbox" data-sel="${u.esc(r.t.id)}" ${sel.has(r.t.id) ? 'checked' : ''} aria-label="Pilih ${u.esc(r.t.id)}">` }]
+        : []),
       { key: 'id', label: 'No. Transaksi', render: (r) => `<b>${u.esc(r.t.id)}</b>${r.t.items.length > 1 ? `<small class="block muted">item ${r.idx + 1}/${r.t.items.length}</small>` : ''}`, value: (r) => r.key },
       { key: 'date', label: 'Tanggal', render: (r) => u.fmtDate(r.t.date), value: (r) => r.t.date },
       { key: 'svc', label: 'Tindakan', render: (r) => `${u.esc(trx.itemLabel(r.it))}<small class="block muted">${u.esc(r.it.serviceCode)}</small>`, value: (r) => r.it.serviceName },
@@ -935,6 +977,82 @@
         }
       }
     ];
+    function drawBulk(rows) {
+      const el = ui.$('#h-bulk', view);
+      if (!canDelete) return;
+      const ids = [...new Set(rows.map((r) => r.t.id))];
+      for (const id of [...sel]) if (!all.some((t) => t.id === id)) sel.delete(id);
+      const periodLbl = hs.preset === 'custom' ? u.fmtDate(hs.start) + ' – ' + u.fmtDate(hs.end) : (ui.$('#h-preset', view).selectedOptions[0] || {}).textContent || '';
+      el.innerHTML = ids.length || sel.size
+        ? `<div class="h-bulk">
+            <span>${sel.size ? `<b>${u.num(sel.size)}</b> transaksi dicentang` : 'Centang transaksi untuk menghapus beberapa sekaligus.'}</span>
+            ${sel.size ? `<button type="button" class="btn btn-sm btn-ghost" data-act="sel-clear">Batal pilih</button><button type="button" class="btn btn-sm btn-danger" data-act="del-sel">${ui.icon('trash')}<span>Hapus terpilih (${u.num(sel.size)})</span></button>` : ''}
+            ${ids.length ? `<button type="button" class="btn btn-sm btn-ghost danger" data-act="del-all" data-n="${ids.length}">${ui.icon('trash')}<span>Hapus semua pada filter ini (${u.num(ids.length)} transaksi${periodLbl ? ' · ' + u.esc(periodLbl) : ''})</span></button>` : ''}
+          </div>`
+        : '';
+      const sa = ui.$('#h-selall', view);
+      if (sa) {
+        sa.checked = ids.length > 0 && ids.every((id) => sel.has(id));
+        sa.indeterminate = !sa.checked && ids.some((id) => sel.has(id));
+      }
+    }
+    /** Hapus permanen dengan konfirmasi + alasan. */
+    async function deleteFlow(ids, title) {
+      const list = all.filter((t) => ids.includes(t.id));
+      const ok = list.filter((t) => trx.deletable(t));
+      const blocked = list.length - ok.length;
+      const reason = await new Promise((resolve) => {
+        ui.modal({
+          title,
+          size: 'md',
+          body: `<div class="confirm-msg danger">${ui.icon('warn')}<div>
+              <b>${u.num(ok.length)} transaksi</b> (${u.rp(u.sum(ok, (t) => t.totals.gross))}) akan <b>dihapus permanen</b> beserta pembagian pendapatannya. Salinannya tetap tersimpan di audit log.
+              ${blocked ? `<br><b>${u.num(blocked)} transaksi</b> dilewati karena sudah masuk penggajian atau memiliki koreksi — gunakan <b>Batalkan</b> untuk transaksi tersebut.` : ''}
+              <br><small>Nomor struk POS/resep yang dihapus dapat diimpor ulang.</small></div></div>
+            <label class="field"><span>Alasan penghapusan <b class="req">*</b></span><input name="reason" maxlength="200" placeholder="mis. salah impor, data dobel"></label>
+            <label class="check"><input type="checkbox" name="sure"><span>Saya mengerti transaksi dihapus permanen</span></label>
+            <div class="form-error" hidden></div>`,
+          actions: [
+            { label: 'Batal', cls: 'btn-ghost', onClick: (m) => { m.close(true); resolve(null); } },
+            {
+              label: 'Hapus ' + u.num(ok.length) + ' transaksi', cls: 'btn-danger', onClick: (m) => {
+                const r = m.el.querySelector('[name=reason]').value.trim();
+                const fe = m.el.querySelector('.form-error');
+                if (!ok.length) return (fe.hidden = false), (fe.textContent = 'Tidak ada transaksi yang dapat dihapus.');
+                if (r.length < 3) return (fe.hidden = false), (fe.textContent = 'Alasan penghapusan wajib diisi (min. 3 karakter).');
+                if (!m.el.querySelector('[name=sure]').checked) return (fe.hidden = false), (fe.textContent = 'Centang konfirmasi terlebih dahulu.');
+                m.close(true);
+                resolve(r);
+              }
+            }
+          ],
+          onClose: () => resolve(null)
+        });
+      });
+      if (!reason) return;
+      try {
+        const res = await ui.busy('Menghapus ' + ok.length + ' transaksi…', () => trx.removeMany(ok.map((t) => t.id), reason));
+        ui.toast(u.num(res.deleted.length) + ' transaksi dihapus (' + u.rp(res.gross) + ')' + (res.skipped.length + blocked ? '; ' + u.num(res.skipped.length + blocked) + ' dilewati' : '') + '.', res.skipped.length ? 'warning' : undefined);
+        res.deleted.forEach((id) => sel.delete(id));
+      } catch (e) {
+        ui.toast(e.message, 'error');
+      }
+      await reload();
+    }
+    view.addEventListener('change', (e) => {
+      const c = e.target;
+      if (c.dataset && c.dataset.sel !== undefined) {
+        if (c.checked) sel.add(c.dataset.sel);
+        else sel.delete(c.dataset.sel);
+        view.querySelectorAll(`[data-sel="${CSS.escape(c.dataset.sel)}"]`).forEach((x) => (x.checked = c.checked));
+        drawBulk(rowsOf());
+      } else if (c.id === 'h-selall') {
+        for (const id of new Set(rowsOf().map((r) => r.t.id))) c.checked ? sel.add(id) : sel.delete(id);
+        view.querySelectorAll('[data-sel]').forEach((x) => (x.checked = sel.has(x.dataset.sel)));
+        drawBulk(rowsOf());
+      }
+    });
+
     function draw() {
       const rows = rowsOf();
       stats(rows);
@@ -944,10 +1062,19 @@
           columns: cols, rows, sortKey: 'date', sortDir: 'desc', cls: 'tbl-dense', rowClass: (r) => (r.t.status === 'cancelled' ? 'row-cancelled' : ''),
           footer: (rs_) => {
             const act = rs_.filter((r) => r.t.status === 'active');
-            return `<tr><th colspan="5">Total (transaksi aktif)</th><th class="ta-right">${u.num(u.sum(act, (r) => r.it.qty))}</th><th></th><th class="ta-right">${u.rp(u.sum(act, (r) => r.it.gross))}</th><th class="ta-right">${u.rp(u.sum(act, (r) => r.sm.business))}</th><th class="ta-right">${u.rp(u.sum(act, (r) => r.sm.staff + r.sm.eksternal))}</th><th colspan="3"></th></tr>`;
+            return `<tr><th colspan="${canDelete ? 6 : 5}">Total (transaksi aktif)</th><th class="ta-right">${u.num(u.sum(act, (r) => r.it.qty))}</th><th></th><th class="ta-right">${u.rp(u.sum(act, (r) => r.it.gross))}</th><th class="ta-right">${u.rp(u.sum(act, (r) => r.sm.business))}</th><th class="ta-right">${u.rp(u.sum(act, (r) => r.sm.staff + r.sm.eksternal))}</th><th colspan="3"></th></tr>`;
           }
         });
     }
+    // centang tetap terlihat setelah tabel dirender ulang (urut/halaman)
+    ui.$('#h-list', view).addEventListener('click', (e) => {
+      if (e.target.closest('[data-sort],[data-pg]')) setTimeout(() => drawBulk(rowsOf()), 0);
+    });
+    const _draw = draw;
+    draw = function () {
+      _draw();
+      drawBulk(rowsOf());
+    };
     draw();
     const reload = async () => {
       all = await trx.all();
@@ -982,6 +1109,16 @@
       if (!a || !view.contains(a)) return;
       const t = all.find((x) => x.id === a.dataset.id);
       switch (a.dataset.act) {
+        case 'sel-clear':
+          sel.clear();
+          draw();
+          break;
+        case 'del-sel':
+          deleteFlow([...sel], 'Hapus ' + sel.size + ' transaksi terpilih');
+          break;
+        case 'del-all':
+          deleteFlow([...new Set(rowsOf().map((r) => r.t.id))], 'Hapus semua transaksi pada filter ini');
+          break;
         case 'detail':
           openDetail(t, reload);
           break;

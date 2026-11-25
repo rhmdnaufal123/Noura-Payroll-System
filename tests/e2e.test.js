@@ -829,7 +829,13 @@ async function step(name, fn) {
     await go('analysis?month=' + prevMonth);
     await page.waitForFunction(() => /1\.510\.000/.test(document.querySelector('.an-group[data-group=homecare]').textContent));
     const hc = await page.locator('.an-group[data-group=homecare]').innerText();
-    assert.ok(/^5\s/m.test(hc.split('\n').find((l) => /tindakan/.test(l)) || ''), hc);
+    // homecare dihitung per kunjungan pasien (nama & tanggal, atau per transaksi bila tanpa nama)
+    const visits = await ev(async (m) => {
+      const s = new Set();
+      for (const t of await NP.db.all('transactions')) if (t.status === 'active' && t.date.startsWith(m) && t.items.some((i) => NP.C.serviceGroup(i.category, i.serviceName) === 'homecare')) s.add(NP.C.visitKey(t));
+      return s.size;
+    }, prevMonth);
+    assert.ok(new RegExp('^' + visits + ' kunjungan', 'm').test(hc) && (visits === 5 || /5 tindakan/.test(hc)), hc + ' / kunjungan ' + visits);
     const db = await page.locator('.an-group[data-group=dokter_bidan]').innerText();
     assert.ok(/tindakan/.test(db));
     await page.click('.an-group[data-group=homecare]');
@@ -908,6 +914,68 @@ async function step(name, fn) {
     assert.deepStrictEqual([t.withDoctor, t.performers.dokter, t.performers.bidan], [true, ids.dr, ids.bd]);
     await page.waitForSelector('#rx-table');
     assert.strictEqual(await page.locator('[data-rx=fix-wd]').count(), 0, 'tidak ada lagi yang perlu diubah');
+  });
+  await step('tab resep: tindakan yang memberi bagian bidan menampilkan pilihan bidan pelaksana', async () => {
+    const sid = await ev(async () => (await NP.svc.save({ id: '', code: '', name: 'Pemeriksaan Dokter + Bidan Uji', category: 'Pemeriksaan dokter', unit: 'KLINIK', price: 100000, active: true, notes: '', overrides: [], doctorShares: [],
+      shares: [{ type: 'unit', target: 'KLINIK', mode: 'remainder', value: 0 }, { type: 'role', target: 'dokter', mode: 'nominal', value: 50000 }, { type: 'role', target: 'bidan', mode: 'nominal', value: 10000 }] })).id);
+    await go('dashboard');
+    await go('bulk?tab=resep');
+    await page.selectOption('[data-rxsvc]', sid);
+    await page.waitForSelector('select[data-rxdef=bidan]');
+    assert.ok(/juga memberi bagian untuk <?b?>?bidan/i.test(await page.locator('.rx-roles').innerText()) || /bidan/.test(await page.locator('.rx-roles').innerText()));
+    const opts = await page.locator('select[data-rxdef=bidan] option').count();
+    assert.ok(opts >= 2, 'daftar bidan tersedia');
+    await page.selectOption('select[data-rxdef=bidan]', { index: 1 });
+    await page.waitForFunction(() => document.querySelector('select[data-rxdef=bidan]') && document.querySelector('select[data-rxdef=bidan]').value);
+    assert.ok(!/Bidan pelaksana belum dipilih/.test(await page.locator('#rx-body').innerText()));
+    // kembalikan pilihan tindakan semula
+    const kons = await ev(async () => (await NP.db.all('services')).find((x) => x.name === 'Konsultasi Dokter Umum').id);
+    await page.selectOption('[data-rxsvc]', kons);
+    await page.waitForTimeout(300);
+  });
+  await step('riwayat transaksi: centang beberapa lalu hapus; hapus semua pada filter; yang sudah digaji dilewati', async () => {
+    await go('transactions');
+    await page.selectOption('#h-preset', 'lastmonth');
+    await page.fill('#h-q', 'POS');
+    await page.waitForTimeout(400);
+    const pick = await ev(async (m) => (await NP.db.all('transactions')).filter((t) => t.date.startsWith(m) && t.externalRef && t.externalRef.startsWith('POS:') && t.status === 'active').map((t) => t.id).sort().slice(0, 2), prevMonth);
+    // pencarian "POS" tidak cocok dengan kolom yang dicari → pakai nomor transaksi
+    await page.fill('#h-q', '');
+    await page.waitForTimeout(300);
+    for (const id of pick) {
+      await page.fill('#h-q', id);
+      await page.waitForTimeout(300);
+      await page.check(`#h-list [data-sel="${id}"] >> nth=0`);
+    }
+    assert.ok(/2 transaksi dicentang/.test(await page.locator('#h-bulk').innerText()));
+    await page.click('[data-act=del-sel]');
+    await page.waitForSelector('.modal-head:has-text("Hapus 2 transaksi terpilih")');
+    await modalBtn('Hapus 2 transaksi').click();
+    assert.ok(/Alasan penghapusan wajib/.test(await page.locator('.modal .form-error').innerText()));
+    await page.fill('.modal [name=reason]', 'uji hapus terpilih');
+    await page.check('.modal [name=sure]');
+    await newToast(() => modalBtn('Hapus 2 transaksi').click(), /2 transaksi dihapus/);
+    assert.strictEqual(await ev(async (ids) => (await NP.db.all('transactions')).filter((t) => ids.includes(t.id)).length, pick), 0);
+    assert.ok(await ev(async () => (await NP.db.all('auditLog')).some((l) => l.action === 'trx.delete' && /uji hapus terpilih/.test(l.detail))));
+    // hapus semua pada filter (pasien tertentu bulan lalu); transaksi bulan berjalan yang sudah digaji tidak ikut terhapus
+    await page.fill('#h-q', 'PASIEN UJI 7');
+    await page.waitForTimeout(400);
+    const n = +(await page.getAttribute('[data-act=del-all]', 'data-n'));
+    assert.ok(n >= 1, 'jumlah pada filter');
+    await page.click('[data-act=del-all]');
+    await page.fill('.modal [name=reason]', 'uji hapus semua filter');
+    await page.check('.modal [name=sure]');
+    await newToast(() => modalBtn('Hapus ' + n + ' transaksi').click(), new RegExp(n + ' transaksi dihapus'));
+    // transaksi yang sudah masuk penggajian (terkunci) dilewati
+    await page.selectOption('#h-preset', 'month');
+    await page.fill('#h-q', 'Pasien Uji');
+    await page.waitForTimeout(400);
+    await page.check('#h-selall');
+    await page.click('[data-act=del-sel]');
+    assert.ok(/dilewati karena sudah masuk penggajian/.test(await page.locator('.modal-body').innerText()));
+    await modalBtn('Batal').click();
+    await page.click('[data-act=sel-clear]');
+    await page.fill('#h-q', '');
   });
   await step('Data Karyawan: tombol Tambah Dokter & Tambah Bidan mengisi jabatan, unit & skema', async () => {
     await go('employees');
@@ -1009,6 +1077,7 @@ async function step(name, fn) {
     await page.click('.auth-card button[type=submit]');
     await page.waitForSelector('#h-list');
     assert.strictEqual(await page.locator('#h-list [data-act=cancel]').count(), 0);
+    assert.strictEqual(await page.locator('#h-selall, [data-act=del-all]').count(), 0, 'operasional tidak dapat menghapus');
     assert.ok((await ev(() => NP.sec.bankView('1234567890'))).includes('*'));
   });
 
