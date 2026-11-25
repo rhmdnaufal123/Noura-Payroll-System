@@ -7,6 +7,12 @@
  *   - role     : target 'dokter'|'bidan'|'perawat'|'farmasi'|'petugas' -> petugas pelaksana transaksi
  *   - employee : target = ID karyawan tertentu
  *   - other    : target = nama penerima lain (non-karyawan, mis. laboratorium mitra)
+ * Opsi per penerima (petugas pelaksana / karyawan tertentu):
+ *   optional : true  → bila pelaksana tidak dipilih, bagiannya kembali ke unit (tanpa error)
+ *   perVisit : true  → nominal dibayar SEKALI per transaksi/kunjungan (bukan × jumlah), dan
+ *                      tidak lagi bila sudah dibayar oleh tindakan lain di transaksi yang sama
+ *                      (opt.paid berisi kunci 'role:<peran>' / 'emp:<id>' yang sudah dibayar).
+ *   Selisihnya selalu masuk ke bagian unit (baris "sisa otomatis").
  * Varian dokter (opsional): service.doctorShares = konfigurasi khusus bila tindakan dilakukan
  * DENGAN dokter; service.shares dipakai bila TANPA dokter. Pembagian khusus per petugas
  * (overrides) tetap diutamakan pada kedua varian.
@@ -63,6 +69,17 @@
   }
   function baseShares(service, withDoctor) {
     return effectiveWithDoctor(service, withDoctor) ? service.doctorShares : (service && service.shares) || [];
+  }
+
+  /** Kunci "sudah dibayar per kunjungan" untuk satu bagian. */
+  function visitKeyOf(s) {
+    return (s.type === 'role' ? 'role:' : 'emp:') + s.target;
+  }
+  /** Peran yang opsional pada varian terpilih (semua bagian peran tsb. bertanda opsional). */
+  function optionalRoles(service, withDoctor) {
+    const by = new Map();
+    for (const s of baseShares(service, withDoctor)) if (s.type === 'role') by.set(s.target, (by.has(s.target) ? by.get(s.target) : true) && !!s.optional);
+    return [...by.entries()].filter((x) => x[1]).map((x) => x[0]);
   }
 
   /** Peran-peran pelaksana yang dibutuhkan oleh suatu tindakan (pada varian dengan/tanpa dokter). */
@@ -173,6 +190,8 @@
     }
 
     // 4. Resolusi penerima
+    let extra = 0; // nominal opsional/per kunjungan yang tidak dibayar → ke unit
+    const paid = new Set(opt.paid || []);
     const shares = cfg.map((s, i) => {
       const out = {
         type: s.type,
@@ -185,7 +204,9 @@
         role: null,
         unitAmount: unit[i],
         amount: unit[i] * qty,
-        implicit: false
+        implicit: false,
+        optional: !!s.optional && s.type === 'role',
+        perVisit: !!s.perVisit && (s.type === 'role' || s.type === 'employee')
       };
       if (s.type === 'unit') {
         out.recipientId = s.target;
@@ -199,6 +220,12 @@
           const e = getEmp(id);
           out.recipientId = id;
           out.recipientName = e ? e.name : id;
+        } else if (out.optional) {
+          // pelaksana opsional tidak ikut → bagiannya kembali ke unit
+          out.recipientName = '(tanpa ' + ((C.ROLES[s.target] || {}).label || s.target).toLowerCase() + ')';
+          extra += out.amount;
+          out.unitAmount = 0;
+          out.amount = 0;
         } else {
           out.recipientName = '(' + ((C.ROLES[s.target] || {}).label || s.target) + ' pelaksana)';
           if (!opt.preview) errors.push('Petugas ' + ((C.ROLES[s.target] || {}).label || s.target) + ' belum dipilih.');
@@ -214,27 +241,43 @@
         out.recipientName = s.target || 'Penerima lain';
         out.category = 'eksternal';
       }
+      if (out.perVisit && out.amount > 0) {
+        const key = visitKeyOf(s);
+        if (paid.has(key)) {
+          extra += out.amount; // sudah dibayar oleh tindakan lain pada kunjungan ini
+          out.unitAmount = 0;
+          out.amount = 0;
+        } else {
+          extra += out.amount - unit[i]; // sekali per kunjungan, bukan × jumlah
+          out.amount = unit[i];
+          paid.add(key);
+        }
+      }
       return out;
     });
 
-    if (rest > 0) {
-      warnings.push('Pembagian belum mencapai harga jual. Sisa ' + u.rp(rest) + ' per tindakan dialokasikan ke ' + C.UNITS[service.unit || 'APT'].name + '.');
+    if (rest > 0 || extra > 0) {
+      if (rest > 0) warnings.push('Pembagian belum mencapai harga jual. Sisa ' + u.rp(rest) + ' per tindakan dialokasikan ke ' + C.UNITS[service.unit || 'APT'].name + '.');
       const uc = service.unit || 'APT';
       shares.push({
         type: 'unit', target: uc, mode: 'remainder', value: 0, recipientId: uc, recipientName: C.UNITS[uc].name,
-        category: uc === 'APT' ? 'apotek' : 'klinik', role: null, unitAmount: rest, amount: rest * qty, implicit: true
+        category: uc === 'APT' ? 'apotek' : 'klinik', role: null, unitAmount: rest, amount: rest * qty + extra, implicit: true, optional: false, perVisit: false
       });
     }
 
     const gross = price * qty;
     const total = shares.reduce((a, s) => a + s.amount, 0);
-    return { shares, gross, unitPrice: price, qty, total, unallocated: errors.length ? 0 : gross - total, errors, warnings, overrideFor: picked.overrideFor, withDoctor };
+    return { shares, gross, unitPrice: price, qty, total, unallocated: errors.length ? 0 : gross - total, errors, warnings, overrideFor: picked.overrideFor, withDoctor, paid: [...paid] };
   }
 
   /** Validasi konfigurasi bagian pada form master tindakan (tanpa petugas). */
   function validateConfig(service) {
     const r = compute(service, { price: service.price, qty: 1, preview: true });
     const errs = r.errors.slice();
+    for (const s of (service.shares || []).concat(service.doctorShares || [])) {
+      if (s.perVisit && s.mode !== 'nominal') errs.push('Bagian "per kunjungan" hanya untuk cara Nominal (Rp).');
+      if (s.optional && s.type !== 'role') errs.push('Bagian opsional hanya untuk petugas pelaksana.');
+    }
     for (const s of service.shares || []) {
       if (!s.type) errs.push('Jenis penerima wajib dipilih.');
       if (s.type !== 'other' && !s.target) errs.push('Penerima pendapatan wajib dipilih.');
@@ -271,6 +314,6 @@
     return t;
   }
 
-  NP.rs = { compute, validateConfig, summarize, summarizeTrx, requiredRoles, pickConfig, hasDoctorVariant, effectiveWithDoctor, methodOf, methodLabel, targetLabel, apportion, MODE_LABELS, TYPE_LABELS };
+  NP.rs = { compute, validateConfig, summarize, summarizeTrx, requiredRoles, optionalRoles, visitKeyOf, pickConfig, hasDoctorVariant, effectiveWithDoctor, methodOf, methodLabel, targetLabel, apportion, MODE_LABELS, TYPE_LABELS };
   if (typeof module !== 'undefined' && module.exports) module.exports = NP;
 })(typeof globalThis !== 'undefined' ? globalThis : window);

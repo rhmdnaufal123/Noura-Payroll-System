@@ -351,6 +351,35 @@ console.log('Impor POS, input bulanan & analisis tindakan');
     ], 'E1', '2026-10-01', '2026-10-31');
     assert.deepStrictEqual(r, { patients: 3, actions: 4 });
   });
+  test('pembagian: pelaksana opsional ke unit & jasa per kunjungan sekali per transaksi', () => {
+    const emp = { B: { name: 'Jihan', position: 'Bidan' }, D: { name: 'dr. Uji', position: 'Dokter Umum' } };
+    const kons = { unit: 'KLINIK', price: 100000, shares: [{ type: 'unit', target: 'KLINIK', mode: 'remainder', value: 0 }, { type: 'role', target: 'dokter', mode: 'nominal', value: 80000 }, { type: 'role', target: 'bidan', mode: 'nominal', value: 15000, optional: true }] };
+    const a = rs.compute(kons, { performers: { dokter: 'D' }, employees: emp });
+    assert.deepStrictEqual([a.errors, a.shares.map((x) => x.amount), a.total], [[], [5000, 80000, 0, 15000], 100000]);
+    const b = rs.compute(kons, { performers: { dokter: 'D', bidan: 'B' }, employees: emp });
+    assert.deepStrictEqual(b.shares.map((x) => x.amount), [5000, 80000, 15000]);
+    assert.deepStrictEqual(rs.optionalRoles(kons), ['bidan']);
+    const hc = { unit: 'KLINIK', price: 380000, shares: [{ type: 'unit', target: 'KLINIK', mode: 'remainder', value: 0 }, { type: 'role', target: 'bidan', mode: 'nominal', value: 100000, perVisit: true }] };
+    const h1 = rs.compute(hc, { qty: 2, performers: { bidan: 'B' }, employees: emp });
+    assert.deepStrictEqual([h1.shares[1].amount, h1.total, h1.paid], [100000, 760000, ['role:bidan']], 'jumlah 2 tetap sekali');
+    const h2 = rs.compute(hc, { performers: { bidan: 'B' }, employees: emp, paid: h1.paid });
+    assert.deepStrictEqual([h2.shares[1].amount, h2.total], [0, 380000], 'tindakan homecare kedua di kunjungan yang sama');
+    assert.ok(rs.validateConfig({ unit: 'KLINIK', price: 1000, shares: [{ type: 'unit', target: 'KLINIK', mode: 'remainder', value: 0 }, { type: 'role', target: 'bidan', mode: 'percent', value: 10, perVisit: true }] }).errors.some((e) => /per kunjungan/.test(e)));
+  });
+  test('laporan jasa per bagian: konsultasi (resep), jasa tindakan, homecare per pelaksana', () => {
+    js('service-income.js');
+    const sh = (id, name, cat, amount) => ({ type: 'role', recipientId: id, recipientName: name, category: cat, amount });
+    const trxs = [
+      { id: 'T1', date: '2026-10-01', status: 'active', externalRef: 'RESEP:Resep/RX-1', patient: 'Tn. A', items: [{ serviceName: 'Biaya Pemeriksaan Dokter', category: 'Pemeriksaan dokter', qty: 1, price: 100000, gross: 100000, performerNames: { dokter: 'dr. X' }, shares: [sh('D', 'dr. X', 'dokter', 80000), sh('B', 'Jihan', 'bidan', 15000)] }] },
+      { id: 'T2', date: '2026-10-01', status: 'active', externalRef: 'POS:SIN-1', patient: 'Tn. A', items: [{ serviceName: 'SUNTIK ASAM LAMBUNG', category: 'Dokter Umum & Bidan', qty: 1, price: 180000, gross: 180000, withDoctor: true, shares: [sh('D', 'dr. X', 'dokter', 25000), sh('B', 'Jihan', 'bidan', 25000)] }, { serviceName: 'PEMERIKSAAN DOKTER', category: 'Dokter Umum & Bidan', qty: 1, price: 100000, gross: 100000, shares: [] }] },
+      { id: 'T3', date: '2026-10-07', status: 'active', externalRef: 'POS:SIN-2', patient: 'Ny. B', items: [{ serviceName: 'INFUS MULTIVITAMIN HC', category: 'Homecare', qty: 1, price: 380000, gross: 380000, shares: [sh('B', 'Jihan', 'bidan', 100000)] }, { serviceName: 'PEMERIKSAAN DOKTER UMUM HC', category: 'Homecare', qty: 1, price: 300000, gross: 300000, shares: [sh('D', 'dr. X', 'dokter', 300000)] }] },
+      { id: 'T4', date: '2026-10-08', status: 'cancelled', items: [{ serviceName: 'SUNTIK KB', category: 'Dokter Umum & Bidan', qty: 1, price: 65000, gross: 65000, shares: [sh('B', 'Jihan', 'bidan', 15000)] }] }
+    ];
+    const R = NP.income.jasaReport(trxs, { start: '2026-10-01', end: '2026-10-31' });
+    assert.deepStrictEqual(R.totals, { konsultasi: { D: 80000, B: 15000 }, jasa: { D: 25000, B: 25000 }, homecare: { D: 300000, B: 100000 } });
+    assert.deepStrictEqual(R.grand, { D: 405000, B: 140000 });
+    assert.deepStrictEqual([R.rows.konsultasi.length, R.rows.jasa.length, R.rows.homecare.length], [2, 1, 2], 'PEMERIKSAAN DOKTER yang dibayar di kasir masuk bagian konsultasi');
+  });
   test('tabel bulanan: satu transaksi per tanggal terisi, maks. 50 tindakan per transaksi', () => {
     const svcMap = new Map(services.map((s) => [s.id, s]));
     const empMap = new Map(emps.map((e) => [e.id, e]));

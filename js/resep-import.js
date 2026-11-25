@@ -156,7 +156,9 @@
    * Susun rencana impor.
    * @param rows      hasil parseSheet().rows
    * @param opt { doctors:Set nama dokter yang diimpor, docMap:{namaDokter:empId}, service (master tindakan), employees,
-   *              kasirLines, trxs, threshold (default 100000), excluded:Set kode, included:Set kode (paksa ikut) }
+   *              kasirLines, trxs, threshold (default 100000), excluded:Set kode, included:Set kode (paksa ikut),
+   *              amounts: Map kode → biaya service hasil ubahan manual,
+   *              skip: Map kode → Set peran opsional yang TIDAK ikut pada resep itu (bagiannya ke unit) }
    */
   function plan(rows, opt) {
     opt = opt || {};
@@ -168,15 +170,19 @@
     const s = opt.service || null;
     const svcById = new Map((opt.services || []).map((x) => [x.id, x]));
     const out = [];
-    for (const r of rows) {
-      const doctor = r.doctor || '(tanpa dokter)';
+    for (const r0 of rows) {
+      const doctor = r0.doctor || '(tanpa dokter)';
       if (opt.doctors && !opt.doctors.has(doctor)) continue;
+      // biaya yang diubah manual (mis. resep Rp0 yang tetap dikenai biaya pemeriksaan)
+      const edited = !!(opt.amounts && opt.amounts.has(r0.code));
+      const r = edited ? Object.assign({}, r0, { service: opt.amounts.get(r0.code) }) : r0;
       const k = patientKey(r.patient) + '|' + r.date;
       const ks = r.patient && r.date ? [...(kasir.get(k) || new Map()).values()] : [];
       const ds = r.patient && r.date ? db.get(k) || [] : [];
       const x = {
         code: r.code, externalRef: 'RESEP:' + r.code, date: r.date, time: r.time, patient: r.patient, doctor, service: r.service, total: r.total, embalase: r.embalase, products: r.products,
         empId: (opt.docMap || {})[doctor] || '',
+        originalService: r0.service, edited,
         low: r.service < threshold, zero: !(r.service > 0),
         kasir: ks,
         db: ds.map((t) => {
@@ -193,13 +199,19 @@
       if (s) {
         const wd = NP.rs.effectiveWithDoctor(s, true);
         const roles = NP.rs.requiredRoles(s, wd);
+        const optional = NP.rs.optionalRoles(s, wd);
+        const skipped = (opt.skip && opt.skip.get(r.code)) || new Set();
+        x.optionalRoles = optional;
+        x.skippedRoles = optional.filter((role) => skipped.has(role));
         const performers = {};
         for (const role of roles) {
+          if (optional.includes(role) && skipped.has(role)) continue; // tidak ikut → bagiannya ke unit
           if (role === 'dokter' && x.empId) performers.dokter = x.empId;
           else if (opt.defaults && opt.defaults[role]) performers[role] = opt.defaults[role];
+          else if (optional.includes(role)) x.skippedRoles.push(role);
           else x.problems.push((NP.C.ROLES[role] || {}).label + ' pelaksana belum dipilih' + (role === 'dokter' ? ' (cocokkan dokter dengan Data Karyawan).' : ' — pilih di bagian 3 (Tindakan untuk biaya pemeriksaan).'));
         }
-        if (!x.zero && roles.every((role) => performers[role])) {
+        if (!x.zero && roles.every((role) => performers[role] || optional.includes(role))) {
           const chk = NP.rs.compute(s, { price: r.service, qty: 1, performers, employees: empMap, withDoctor: wd });
           chk.errors.forEach((e) => x.problems.push(e));
         }

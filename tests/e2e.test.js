@@ -933,6 +933,60 @@ async function step(name, fn) {
     await page.selectOption('[data-rxsvc]', kons);
     await page.waitForTimeout(300);
   });
+  await step('bidan opsional & ubah biaya resep: biaya Rp0 diisi, bidan tidak ikut → bagiannya ke unit; laporan per bagian', async () => {
+    // master tindakan lewat form: kolom "Opsi" → Opsional
+    await go('services');
+    await page.click('[data-act=add]');
+    const m = page.locator('.svc-form');
+    await m.locator('[name=name]').fill('Konsultasi Bidan Opsional Uji');
+    await m.locator('[name=category]').selectOption('Pemeriksaan dokter');
+    await m.locator('[name=unit]').selectOption('KLINIK');
+    await m.locator('[name=price]').fill('100000');
+    const rows = m.locator('#share-main .share-row:not(.share-head)');
+    await rows.nth(0).locator('[data-f=target]').selectOption('KLINIK');
+    await rows.nth(0).locator('[data-f=mode]').selectOption('remainder');
+    await rows.nth(1).locator('[data-f=value]').fill('15000');
+    await rows.nth(1).locator('[data-f=flag]').selectOption('optional');
+    await m.locator('#share-main [data-add]').click();
+    await m.locator('#share-main .share-row:not(.share-head)').nth(2).locator('[data-f=value]').fill('80000');
+    await page.waitForFunction(() => /sesuai/.test(document.querySelector('#share-preview').innerText) && /opsional/.test(document.querySelector('#share-preview').innerText));
+    await modalBtn('Simpan Tindakan').click();
+    await page.waitForSelector('.modal-backdrop', { state: 'detached' });
+    const svc = await ev(async () => (await NP.db.all('services')).find((x) => x.name === 'Konsultasi Bidan Opsional Uji'));
+    assert.deepStrictEqual(svc.shares.map((x) => [x.target, x.value, !!x.optional]), [['KLINIK', 0, false], ['bidan', 15000, true], ['dokter', 80000, false]]);
+    // impor resep: An. RESEP DUA (Rp0 di file) diisi Rp100.000, bidan tidak ikut
+    await go('dashboard');
+    await go('bulk?tab=resep');
+    await page.selectOption('[data-rxsvc]', svc.id);
+    await page.waitForSelector('select[data-rxdef=bidan]');
+    await page.selectOption('select[data-rxdef=bidan]', { index: 1 });
+    await page.waitForSelector('[data-rxamt="Resep/RXUJI-5"]');
+    await page.click('[data-rxamt="Resep/RXUJI-5"]');
+    await page.fill('.modal [name=v]', '100000');
+    await modalBtn('Simpan').click();
+    await page.waitForFunction(() => /diubah dari Rp0/.test(document.querySelector('#rx-table').innerText));
+    // tunggu tabel digambar ulang (elemen lama terlepas) sebelum mengimpor
+    const old = await page.$('#rx-table');
+    await page.uncheck('[data-rxrole="Resep/RXUJI-5|bidan"]');
+    await page.waitForFunction((el) => !el.isConnected, old);
+    await page.waitForFunction(() => { const c = document.querySelector('[data-rxrole="Resep/RXUJI-5|bidan"]'); return c && !c.checked; });
+    assert.ok(/Impor 1 biaya dokter/.test(await page.locator('[data-rx=import]').innerText()), await page.locator('[data-rx=import]').innerText());
+    await page.click('[data-rx=import]');
+    await newToast(() => modalBtn('Impor sekarang').click(), /1 biaya dokter diimpor/);
+    const it = await ev(async () => (await NP.db.all('transactions')).find((t) => t.externalRef === 'RESEP:Resep/RXUJI-5').items[0]);
+    const by = Object.fromEntries(it.shares.map((x) => [x.category, (x.implicit ? 'sisa ' : '') + x.amount]));
+    assert.strictEqual(it.price, 100000);
+    assert.deepStrictEqual([by.dokter, by.bidan, it.shares.reduce((a, x) => a + x.amount, 0)], ['80000', '0', 100000]);
+    // Rekap Jasa › Laporan Dokter & Bidan
+    await go('income');
+    await page.fill('#r-period', prevMonth);
+    await page.dispatchEvent('#r-period', 'change');
+    await page.click('[data-tab=section]');
+    await page.waitForSelector('[data-grand]');
+    assert.ok(/Konsultasi Dokter/.test(await page.locator('#r-body').innerText()) && /Homecare/.test(await page.locator('#r-body').innerText()));
+    const x = await download(() => page.click('[data-act=xls-section]'));
+    assert.ok(/^laporan-jasa-dokter-bidan-.*\.xlsx$/.test(x.name), x.name);
+  });
   await step('riwayat transaksi: centang beberapa lalu hapus; hapus semua pada filter; yang sudah digaji dilewati', async () => {
     await go('transactions');
     await page.selectOption('#h-preset', 'lastmonth');

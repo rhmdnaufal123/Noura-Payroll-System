@@ -89,7 +89,7 @@
   svc.shareSummary = function (s, employees, list) {
     return (list || s.shares || [])
       .map((x) => {
-        const v = x.mode === 'percent' ? u.pct(x.value) : x.mode === 'remainder' ? 'sisa' : u.rp(x.value);
+        const v = (x.mode === 'percent' ? u.pct(x.value) : x.mode === 'remainder' ? 'sisa' : u.rp(x.value)) + (x.perVisit ? '/kunjungan' : '') + (x.optional ? ' (opsional)' : '');
         return '<span class="share-chip share-' + (x.type === 'unit' ? (x.target === 'APT' ? 'apotek' : 'klinik') : x.type === 'role' ? x.target : x.type) + '">' + u.esc(rs.targetLabel(x, employees).replace(' pelaksana', '')) + ' ' + v + '</span>';
       })
       .join(' ');
@@ -114,6 +114,14 @@
       if (s.type === 'employee') return `<select data-f="target" data-i="${i}">${ui.options(empOpts, s.target, '— pilih karyawan —')}</select>`;
       return `<input data-f="target" data-i="${i}" value="${u.esc(s.target || '')}" placeholder="mis. Laboratorium mitra">`;
     }
+    /** Opsi bagian: pelaksana opsional (bagian ke unit bila tidak ikut) / per kunjungan (sekali per transaksi). */
+    function flagCtl(s, i) {
+      const cur = [s.optional ? 'optional' : '', s.perVisit ? 'visit' : ''].filter(Boolean).join(',');
+      if (s.type === 'role')
+        return `<select data-f="flag" data-i="${i}" aria-label="Opsi bagian" title="Opsional: bila pelaksana tidak dipilih, bagiannya ke unit. Per kunjungan: nominal dibayar sekali per transaksi.">${ui.options([['', 'Wajib ikut'], ['optional', 'Opsional'], ['visit', 'Per kunjungan'], ['optional,visit', 'Opsional · per kunjungan']], cur)}</select>`;
+      if (s.type === 'employee') return `<select data-f="flag" data-i="${i}" aria-label="Opsi bagian">${ui.options([['', 'Per tindakan'], ['visit', 'Per kunjungan']], cur)}</select>`;
+      return '<span class="muted small share-flag-none">—</span>';
+    }
     function draw() {
       const allowed = modesAllowed().map((x) => x[0]);
       state.shares.forEach((s) => {
@@ -121,7 +129,7 @@
       });
       host.innerHTML = `
         <div class="share-rows">
-          <div class="share-row share-head"><span>Jenis penerima</span><span>Penerima</span><span>Cara</span><span>Nilai</span><span></span></div>
+          <div class="share-row share-head"><span>Jenis penerima</span><span>Penerima</span><span>Cara</span><span>Nilai</span><span>Opsi</span><span></span></div>
           ${state.shares
             .map(
               (s, i) => `<div class="share-row">
@@ -129,6 +137,7 @@
               ${targetCtl(s, i)}
               <select data-f="mode" data-i="${i}" aria-label="Cara pembagian">${ui.options(modesAllowed(), s.mode)}</select>
               ${s.mode === 'remainder' ? '<input value="Otomatis" disabled>' : s.mode === 'percent' ? `<div class="input-suffix"><input data-f="value" data-i="${i}" type="number" min="0" max="100" step="0.01" value="${u.esc(s.value)}"><span>%</span></div>` : `<div class="input-prefix"><span>Rp</span><input data-f="value" data-i="${i}" data-money inputmode="numeric" value="${ui.moneyVal(s.value)}"></div>`}
+              ${flagCtl(s, i)}
               <button type="button" class="icon-btn danger" data-del="${i}" title="Hapus penerima">${ui.icon('trash')}</button>
             </div>`
             )
@@ -143,6 +152,8 @@
       const s = state.shares[+e.target.dataset.i];
       if (f === 'type') {
         s.type = e.target.value;
+        if (s.type !== 'role') s.optional = false;
+        if (s.type !== 'role' && s.type !== 'employee') s.perVisit = false;
         s.target = s.type === 'unit' ? 'APT' : s.type === 'role' ? 'dokter' : '';
         draw();
       } else if (f === 'mode') {
@@ -151,6 +162,10 @@
         draw();
       } else if (f === 'target') {
         s.target = e.target.value;
+        opt.onChange && opt.onChange();
+      } else if (f === 'flag') {
+        s.optional = e.target.value.includes('optional');
+        s.perVisit = e.target.value.includes('visit');
         opt.onChange && opt.onChange();
       }
     });
@@ -178,7 +193,7 @@
     });
     draw();
     return {
-      get: () => state.shares.map((s) => ({ type: s.type, target: s.target, mode: s.mode, value: s.mode === 'remainder' ? 0 : s.value })),
+      get: () => state.shares.map((s) => Object.assign({ type: s.type, target: s.target, mode: s.mode, value: s.mode === 'remainder' ? 0 : s.value }, s.optional && s.type === 'role' ? { optional: true } : {}, s.perVisit && (s.type === 'role' || s.type === 'employee') ? { perVisit: true } : {})),
       setMethod(m) {
         state.method = m;
         draw();
@@ -192,7 +207,7 @@
     const r = rs.compute(service, { qty: qty || 1, preview: true, employees: new Map(employees.map((e) => [e.id, e])), withDoctor: !!withDoctor });
     const v = { errors: all.errors.filter((e) => (withDoctor ? isDoc(e) : !isDoc(e))).map((e) => e.replace('Dengan dokter: ', '')), warnings: withDoctor ? r.warnings : all.warnings };
     const rows = r.shares
-      .map((s) => `<tr><td>${u.esc(s.recipientName)}${s.implicit ? ' <small class="muted">(sisa otomatis)</small>' : ''}<small class="block muted">${u.esc(C.SHARE_CATS[s.category] || '')}</small></td><td class="ta-right">${s.mode === 'percent' ? u.pct(s.value) : s.mode === 'remainder' ? 'Sisa' : 'Nominal'}</td><td class="ta-right">${u.rp(s.unitAmount)}</td><td class="ta-right"><b>${u.rp(s.amount)}</b></td></tr>`)
+      .map((s) => `<tr><td>${u.esc(s.recipientName)}${s.implicit ? ' <small class="muted">(sisa otomatis)</small>' : ''}${s.perVisit ? ' <small class="muted">· per kunjungan</small>' : ''}${s.optional ? ' <small class="muted">· opsional</small>' : ''}<small class="block muted">${u.esc(C.SHARE_CATS[s.category] || '')}</small></td><td class="ta-right">${s.mode === 'percent' ? u.pct(s.value) : s.mode === 'remainder' ? 'Sisa' : 'Nominal'}</td><td class="ta-right">${u.rp(s.unitAmount)}</td><td class="ta-right"><b>${u.rp(s.amount)}</b></td></tr>`)
       .join('');
     const status = v.errors.length
       ? `<div class="alert alert-danger">${ui.icon('x')}<div>${v.errors.map(u.esc).join('<br>')}</div></div>`
