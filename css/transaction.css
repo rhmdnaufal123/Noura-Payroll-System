@@ -177,3 +177,7 @@
 .h-bulk > span { flex: 1 1 220px; }
 .tbl input[data-sel], .tbl #h-selall { width: 18px; height: 18px; }
 .rx-role { margin: 0; font-size: 12.5px; } .rx-amt { width: 28px; height: 28px; vertical-align: middle; }
+
+/* Jasa bidan homecare (Input Bulanan) */
+#hc-table select[data-hcb] { min-width: 128px; width: 100%; max-width: 220px; }
+.hc-svc .flag { white-space: normal; }

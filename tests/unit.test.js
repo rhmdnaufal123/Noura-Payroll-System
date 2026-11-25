@@ -540,5 +540,64 @@ console.log('Impor biaya dokter (penebusan resep)');
   });
 }
 
+console.log('Jasa bidan homecare per kunjungan');
+{
+  js('homecare.js');
+  const U = { type: 'unit', target: 'KLINIK', mode: 'remainder', value: 0 };
+  const mk = (id, name, price, shares) => ({ id, code: id, name, category: 'Homecare', unit: 'KLINIK', price, active: true, shares, doctorShares: [], overrides: [] });
+  const infus = mk('HC1', 'Infus Multivitamin HC', 380000, [U]);
+  const paket = mk('HC2', 'Paket Pemeriksaan HC', 150000, [U, { type: 'role', target: 'bidan', mode: 'nominal', value: 30000 }]);
+  const dokter = mk('HC3', 'Pemeriksaan Dokter Umum HC', 300000, [{ type: 'role', target: 'dokter', mode: 'nominal', value: 300000 }]);
+  const murah = mk('HC4', 'Cek Gula HC', 60000, [U]);
+  const kb = { id: 'KB', code: 'KB', name: 'Suntik KB', category: 'Dokter Umum & Bidan', unit: 'KLINIK', price: 65000, active: true, shares: [U, { type: 'role', target: 'bidan', mode: 'nominal', value: 15000 }], doctorShares: [], overrides: [] };
+  const emps = new Map([['B1', { id: 'B1', name: 'Bidan Satu', position: 'Bidan' }], ['D1', { id: 'D1', name: 'dr. Satu', position: 'Dokter Umum' }]]);
+
+  test('rencana aturan: tindakan HC diubah, khusus dokter dilewati, harga kurang ditolak', () => {
+    const st = [infus, paket, dokter, murah].map((s) => NP.hc.planService(s, 100000).status);
+    assert.deepStrictEqual(st, ['change', 'change', 'doctor', 'short']);
+    const n = NP.hc.planService(paket, 100000).next;
+    assert.deepStrictEqual(n.shares.filter((x) => x.type === 'role'), [{ type: 'role', target: 'bidan', mode: 'nominal', value: 100000, perVisit: true }], 'bagian bidan lama diganti');
+    assert.strictEqual(NP.hc.planService(n, 100000).status, 'ok');
+    assert.strictEqual(NP.hc.planService(n, 120000).status, 'change', 'nominal berbeda → diubah lagi');
+    assert.strictEqual(NP.hc.planService(mk('HC5', 'PEMERIKSAAN DOKTER UMUM HC', 300000, [U]), 100000).status, 'doctor', 'dikenali dari nama');
+    assert.ok(!NP.hc.isHomecare(kb) && NP.hc.isHomecare({ name: 'SUNTIK MULTIVITAMIN HC', category: 'Lainnya' }));
+  });
+
+  const ruledInfus = NP.hc.planService(infus, 100000).next;
+  const ruledPaket = NP.hc.planService(paket, 100000).next;
+  const services = [ruledInfus, ruledPaket, dokter, kb];
+  const item = (svc, perf, paid, lineId) => {
+    const r = rs.compute(svc, { price: svc.price, qty: 1, performers: perf, employees: emps, paid: [...paid] });
+    assert.deepStrictEqual(r.errors, []);
+    r.paid.forEach((k) => paid.add(k));
+    return { lineId, serviceId: svc.id, serviceName: svc.name, category: svc.category, qty: 1, price: svc.price, withDoctor: false, performers: perf, shares: r.shares };
+  };
+  test('satu kunjungan dengan banyak tindakan HC: bidan dibayar sekali Rp100.000', () => {
+    const paid = new Set();
+    const items = [item(ruledInfus, { bidan: 'B1' }, paid), item(ruledPaket, { bidan: 'B1' }, paid), item(dokter, { dokter: 'D1' }, paid)];
+    const sum = rs.summarize([].concat(...items.map((i) => i.shares)));
+    assert.deepStrictEqual([sum.bidan, sum.dokter, sum.klinik], [100000, 300000, 380000 + 150000 - 100000]);
+  });
+  test('daftar kunjungan & draft terapkan: hanya tindakan HC berjasa bidan dihitung ulang', () => {
+    const old = (svc, perf) => ({ lineId: 'L-' + svc.id, serviceId: svc.id, serviceName: svc.name, category: svc.category, qty: 1, price: svc.price, withDoctor: false, performers: perf, shares: rs.compute(svc, { price: svc.price, qty: 1, performers: perf, employees: emps }).shares });
+    const tOld = { id: 'TRX-1', status: 'active', date: '2026-10-07', patient: 'Ny. Astri', items: [old(infus, {}), old(kb, { bidan: 'B1' }), old(dokter, { dokter: 'D1' })] };
+    const paid = new Set();
+    const tOk = { id: 'TRX-2', status: 'active', date: '2026-10-12', patient: 'Tn. Budi', items: [item(ruledInfus, { bidan: 'B1' }, paid, 'a'), item(ruledPaket, { bidan: 'B1' }, paid, 'b')] };
+    const tDoc = { id: 'TRX-3', status: 'active', date: '2026-10-13', patient: 'An. C', items: [old(dokter, { dokter: 'D1' })] };
+    const tOut = Object.assign({}, tOk, { id: 'TRX-4', date: '2026-11-01' });
+    const tKb = { id: 'TRX-5', status: 'active', date: '2026-10-14', patient: 'Ny. D', items: [old(kb, { bidan: 'B1' })] };
+    const V = NP.hc.visits([tOld, tOk, tDoc, tOut, tKb], services, { start: '2026-10-01', end: '2026-10-31', nominal: 100000 });
+    assert.deepStrictEqual(V.map((v) => [v.t.id, v.status, v.bidanAmount]), [['TRX-1', 'fix', 0], ['TRX-2', 'ok', 100000], ['TRX-3', 'norule', 0]]);
+    assert.strictEqual(V[0].bidanId, 'B1', 'bidan diambil dari tindakan lain di struk yang sama');
+    const d = NP.hc.draftFor(tOld, 'B1', services, 100000);
+    assert.deepStrictEqual(d.items.map((i) => [i.serviceId, i.lineId, i.performers.bidan || null]), [['HC1', undefined, 'B1'], ['KB', 'L-KB', 'B1'], ['HC3', 'L-HC3', null]]);
+    // hasil simpan ulang: bidan 100.000 dari infus + 15.000 suntik KB, dokter tetap
+    const p2 = new Set();
+    const again = d.items.map((i) => (i.lineId ? tOld.items.find((x) => x.lineId === i.lineId) : item(services.find((s) => s.id === i.serviceId), i.performers, p2)));
+    const V2 = NP.hc.visits([Object.assign({}, tOld, { items: again })], services, { nominal: 100000 });
+    assert.deepStrictEqual([V2[0].status, V2[0].bidanAmount], ['ok', 100000]);
+  });
+}
+
 console.log('\n' + passed + ' lulus, ' + failures.length + ' gagal');
 if (failures.length) process.exit(1);

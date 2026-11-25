@@ -282,7 +282,12 @@
 
   /* ---------- Tabel dengan urutkan & halaman ---------- */
   ui.table = function (container, opt) {
-    const state = { page: 1, sortKey: opt.sortKey || null, sortDir: opt.sortDir || 'asc', rows: opt.rows || [] };
+    // opt.state (objek milik pemanggil) menyimpan halaman & urutan agar tetap sama saat tabel digambar ulang
+    const state = opt.state || {};
+    if (!(state.page >= 1)) state.page = 1;
+    if (state.sortKey === undefined) state.sortKey = opt.sortKey || null;
+    if (!state.sortDir) state.sortDir = opt.sortDir || 'asc';
+    state.rows = opt.rows || [];
     const pageSize = opt.pageSize || 25;
     function sorted() {
       if (!state.sortKey) return state.rows;

@@ -324,6 +324,33 @@ async function step(name, fn) {
     await A.click('.an-group[data-group=homecare]');
     await A.waitForFunction(() => document.querySelectorAll('#an-svc tbody tr').length === 4);
   });
+  await step('jasa bidan homecare Rp100.000 per kunjungan: aturan di master server & diterapkan ke transaksi tersimpan', async () => {
+    await go(A, 'bulk?tab=homecare&month=' + prevMonth);
+    await A.waitForSelector('.hc-svc');
+    await toastAfter(A, async () => {
+      await A.click('[data-hc=save-rule]');
+      await modalBtn(A, 'Simpan aturan').click();
+    }, /per kunjungan disimpan/, 60000);
+    const rules = await sql("select s.name, r.value::int, r.per_visit from public.service_master s join public.service_revenue_rules r on r.service_id = s.id where s.category = 'Homecare' and r.recipient_type = 'role' and r.target = 'bidan' order by s.name");
+    assert.ok(rules.length === 3 && rules.every((r) => r.value === 100000 && r.per_visit) && !rules.some((r) => /DOKTER/i.test(r.name)), JSON.stringify(rules));
+    const gross0 = await sql("select sum(gross)::bigint::text g from public.service_transaction_items where category = 'Homecare'");
+    await A.waitForSelector('#hc-bidan');
+    await A.selectOption('#hc-bidan', ID.bidan);
+    await A.waitForFunction(() => { const b = document.querySelector('[data-hc=apply]'); return b && !b.disabled; });
+    await toastAfter(A, async () => {
+      await A.click('[data-hc=apply]');
+      await modalBtn(A, 'Terapkan').click();
+    }, /kunjungan homecare diperbarui/, 90000);
+    // per transaksi homecare yang memiliki tindakan berjasa bidan: tepat Rp100.000 untuk bidan
+    const v = await sql(`select t.id, coalesce(sum(a.amount) filter (where a.category = 'bidan' and a.kind = 'share'), 0)::int bidan, bool_or(a.per_visit) pv
+      from public.service_transactions t join public.service_transaction_items i on i.transaction_id = t.id and i.category = 'Homecare'
+      left join public.service_transaction_allocations a on a.item_id = i.id
+      where t.status = 'active' and exists (select 1 from public.service_transaction_items j where j.transaction_id = t.id and j.category = 'Homecare' and j.service_name !~* 'dokter')
+      group by t.id`);
+    assert.ok(v.length >= 3 && v.every((x) => x.bidan === 100000 && x.pv), JSON.stringify(v));
+    assert.deepStrictEqual(await sql("select sum(gross)::bigint::text g from public.service_transaction_items where category = 'Homecare'"), gross0, 'pendapatan kotor tetap');
+    await A.waitForFunction(() => /Perlu diterapkan\s*0/.test(document.querySelector('#bk-body .stats-row').innerText));
+  });
 
   await step('hapus transaksi lewat Riwayat (server): admin saja, yang sudah digaji dilewati, struk dapat diimpor ulang', async () => {
     const ids = (await sql("select id from public.service_transactions where external_ref like 'POS:%' order by id limit 2")).map((r) => r.id);
