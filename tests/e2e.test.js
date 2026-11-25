@@ -666,6 +666,21 @@ async function step(name, fn) {
     assert.ok(/SLIP GAJI/.test(content) && /TAKE HOME PAY/.test(content) && !/STR-/.test(content));
     // cap digital pengesahan ikut di file HTML
     assert.ok(/class="s-stamp" src="data:image\/svg\+xml;base64,/.test(content) && /Kode verifikasi/.test(content), 'cap digital di HTML');
+    // dokter menerima SLIP PENGHASILAN; penerima "Dokter"; karyawan lain tetap SLIP GAJI
+    const k = await ev(async () => {
+      const run = (await NP.payroll.runs()).find((r) => r.status !== 'draft' && r.slips.length);
+      const base = run.slips[0];
+      const as = (position) => {
+        const s = Object.assign({}, base, { employee: Object.assign({}, base.employee, { position }) });
+        const el = document.createElement('div');
+        el.innerHTML = NP.slip.html(run, s);
+        const svg = atob(el.querySelector('.s-stamp').src.split(',')[1]);
+        return { title: el.querySelector('.s-title h1').textContent, recv: el.querySelectorAll('.s-sign > div')[1].querySelectorAll('small')[1].textContent, net: el.querySelector('.thp span').textContent, stamp: /PENGESAHAN SLIP [A-Z]+/.exec(svg)[0], file: NP.slip.kind(s).file };
+      };
+      return { dokter: as('Dokter Umum'), bidan: as('Bidan') };
+    });
+    assert.deepStrictEqual(k.dokter, { title: 'SLIP PENGHASILAN', recv: 'Dokter', net: 'PENGHASILAN BERSIH / TAKE HOME PAY', stamp: 'PENGESAHAN SLIP PENGHASILAN', file: 'slip-penghasilan' });
+    assert.deepStrictEqual(k.bidan, { title: 'SLIP GAJI', recv: 'Karyawan', net: 'GAJI BERSIH / TAKE HOME PAY', stamp: 'PENGESAHAN SLIP GAJI', file: 'slip-gaji' });
   });
   await step('cap digital: tanggal & jam pengesahan, kode verifikasi, ikut di PNG/PDF; draft tanpa cap', async () => {
     await go('payslips');
@@ -868,13 +883,20 @@ async function step(name, fn) {
     const byName = Object.fromEntries(st);
     assert.ok(/Khusus dokter/.test(byName['PEMERIKSAAN DOKTER UMUM HC']), JSON.stringify(st));
     assert.ok(/Akan diubah/.test(byName['INFUS MULTIVITAMIN HC']) && /Akan diubah/.test(byName['PAKET PEMERIKSAAN HC']), JSON.stringify(st));
+    // nominal jasa bidan diatur satu per satu: Paket Pemeriksaan HC Rp80.000
+    const paketRow = page.locator('.hc-svc tbody tr', { hasText: /PAKET PEMERIKSAAN HC/i });
+    const old = await page.$('.hc-svc');
+    await paketRow.locator('input[data-hcamt]').fill('80.000');
+    await paketRow.locator('input[data-hcamt]').dispatchEvent('change');
+    await page.waitForFunction((el) => !el.isConnected && /menjadi Rp80\.000 per kunjungan/.test(document.querySelector('.hc-svc').innerText), old);
     await newToast(async () => {
       await page.click('[data-hc=save-rule]');
       await modalBtn('Simpan aturan').click();
     }, /per kunjungan disimpan/);
     await page.waitForFunction(() => /Aturan sudah tersimpan/.test(document.querySelector('[data-hc=save-rule]').textContent));
-    const rule = await ev(async () => (await NP.svc.all()).filter((s) => /^infus multivitamin hc$/i.test(s.name)).map((s) => s.shares.filter((x) => x.type === 'role')));
-    assert.deepStrictEqual(rule[0], [{ type: 'role', target: 'bidan', mode: 'nominal', value: 100000, perVisit: true }]);
+    const rule = await ev(async () => Object.fromEntries((await NP.svc.all()).filter((s) => /^(infus multivitamin|paket pemeriksaan) hc$/i.test(s.name)).map((s) => [s.name.toUpperCase(), s.shares.filter((x) => x.type === 'role')])));
+    assert.deepStrictEqual(rule['INFUS MULTIVITAMIN HC'], [{ type: 'role', target: 'bidan', mode: 'nominal', value: 100000, perVisit: true }]);
+    assert.deepStrictEqual(rule['PAKET PEMERIKSAAN HC'], [{ type: 'role', target: 'bidan', mode: 'nominal', value: 80000, perVisit: true }]);
     const before = await ev(async (m) => (await NP.db.all('transactions')).filter((t) => t.date.startsWith(m) && t.status === 'active').reduce((a, t) => a + t.totals.gross, 0), prevMonth);
     const bid = await page.locator('#hc-bidan option').nth(1).getAttribute('value');
     await page.selectOption('#hc-bidan', bid);
@@ -888,11 +910,13 @@ async function step(name, fn) {
     const r = await ev(async ([m, bid]) => {
       const ts = (await NP.db.all('transactions')).filter((t) => t.date.startsWith(m) && t.status === 'active');
       const services = await NP.svc.all();
-      const V = NP.hc.visits(ts, services, { nominal: 100000 });
-      return { gross: ts.reduce((a, t) => a + t.totals.gross, 0), st: V.map((v) => v.status), amt: V.filter((v) => v.status === 'ok').map((v) => v.bidanAmount), bid: V.filter((v) => v.status === 'ok').every((v) => v.bidanId === bid) };
+      const V = NP.hc.visits(ts, services, {});
+      const ok = V.filter((v) => v.status === 'ok');
+      return { gross: ts.reduce((a, t) => a + t.totals.gross, 0), st: V.map((v) => v.status), amt: ok.map((v) => v.bidanAmount), exp: ok.map((v) => v.expected), bid: ok.every((v) => v.bidanId === bid) };
     }, [prevMonth, bid]);
     assert.strictEqual(r.gross, before, 'pendapatan kotor tidak berubah');
-    assert.ok(r.st.every((x) => x !== 'fix') && r.amt.length >= n && r.amt.every((a) => a === 100000) && r.bid, JSON.stringify(r));
+    assert.ok(r.st.every((x) => x !== 'fix') && r.amt.length >= n && r.amt.every((a) => a === 100000 || a === 80000) && r.bid, JSON.stringify(r));
+    assert.deepStrictEqual(r.amt, r.exp);
     assert.ok(/Perlu diterapkan\s*0/.test(await page.locator('#bk-body .stats-row').innerText()));
   });
   await step('impor biaya dokter dari file resep: pilih dokter, tandai pasien sama & service < Rp100.000', async () => {

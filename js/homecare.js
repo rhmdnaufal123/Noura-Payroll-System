@@ -1,6 +1,6 @@
 /* Noura Payroll — JASA BIDAN HOMECARE PER KUNJUNGAN (logika murni, dipakai tab Input Bulanan).
- *  Aturan: bidan pelaksana mendapat nominal tetap (bawaan Rp100.000) SEKALI per kunjungan —
- *  satu transaksi/struk yang berisi tindakan homecare — berapa pun jumlah tindakannya.
+ *  Aturan: bidan pelaksana mendapat nominal tetap (bawaan Rp100.000, dapat diatur per tindakan)
+ *  SEKALI per kunjungan — satu transaksi/struk berisi tindakan homecare — berapa pun jumlah tindakannya.
  *  Aturan disimpan di Master Tindakan sebagai bagian "Bidan pelaksana · Nominal · Per kunjungan",
  *  sehingga dihitung oleh mesin pembagian yang sama (lokal & server). Tindakan homecare yang
  *  seluruhnya untuk dokter (mis. Pemeriksaan Dokter Umum HC Rp300.000) tidak diubah.
@@ -14,7 +14,12 @@
 
   const DEFAULT_NOMINAL = 100000;
   const isHomecare = (s) => !!s && C.serviceGroup(s.category, s.name || s.serviceName) === 'homecare';
-  const isBidanVisit = (s, nominal) => s.type === 'role' && s.target === 'bidan' && s.mode === 'nominal' && !!s.perVisit && u.toInt(s.value) === nominal;
+  const isBidanVisit = (s, nominal) => s.type === 'role' && s.target === 'bidan' && s.mode === 'nominal' && !!s.perVisit && (nominal == null || u.toInt(s.value) === nominal);
+  /** Nominal jasa bidan per kunjungan yang tersimpan pada tindakan (0 bila belum diatur). */
+  const ruleValue = (service) => {
+    const s = ((service && service.shares) || []).find((x) => isBidanVisit(x));
+    return s ? u.toInt(s.value) : 0;
+  };
   const hasRole = (list, role) => (list || []).some((s) => s.type === 'role' && s.target === role);
 
   /** Ganti bagian bidan menjadi nominal per kunjungan; bagian lain tetap. */
@@ -44,23 +49,25 @@
     return { service, status, next, errors: nominal > 0 ? v.errors : ['Nominal jasa bidan harus lebih dari 0.'], doctorOnly };
   }
 
-  /** Tindakan homecare dengan aturan bidan per kunjungan (sudah tersimpan di master). */
-  const ruled = (service, nominal) => isHomecare(service) && (service.shares || []).some((s) => isBidanVisit(s, nominal));
+  /** Tindakan homecare dengan aturan bidan per kunjungan (sudah tersimpan di master; nominal boleh berbeda per tindakan). */
+  const ruled = (service) => isHomecare(service) && ruleValue(service) > 0;
 
   /**
    * Kunjungan homecare (transaksi aktif yang berisi tindakan homecare) dalam rentang tanggal.
-   * @returns [{ t, hcItems, ruledItems, bidanAmount, bidanId, status }]
+   * @returns [{ t, hcItems, ruledItems, expected, bidanAmount, bidanId, status }]
+   *   expected: jasa bidan kunjungan = nominal tindakan berjasa bidan PERTAMA pada struk (sama dengan
+   *             mesin pembagian: bagian per kunjungan dibayar sekali oleh tindakan pertama)
    *   status: 'ok' | 'fix' (perlu diterapkan) | 'norule' (tak ada tindakan berjasa bidan)
    */
   function visits(trxs, services, opt) {
     const svcMap = new Map(services.map((s) => [s.id, s]));
-    const nominal = u.toInt(opt.nominal);
     const out = [];
     for (const t of trxs) {
       if (t.status !== 'active' || (opt.start && t.date < opt.start) || (opt.end && t.date > opt.end)) continue;
       const hcItems = t.items.filter((i) => isHomecare(svcMap.get(i.serviceId) || i));
       if (!hcItems.length) continue;
-      const ruledItems = hcItems.filter((i) => ruled(svcMap.get(i.serviceId), nominal));
+      const ruledItems = hcItems.filter((i) => ruled(svcMap.get(i.serviceId)));
+      const expected = ruledItems.length ? ruleValue(svcMap.get(ruledItems[0].serviceId)) : 0;
       // jasa bidan dari tindakan homecare saja (jasa bidan tindakan lain di struk yang sama tidak dihitung)
       let bidanAmount = 0;
       let bidanId = '';
@@ -73,8 +80,8 @@
         }
       }
       for (const i of t.items) if (!bidanId && i.performers && i.performers.bidan) bidanId = i.performers.bidan;
-      const status = !ruledItems.length ? 'norule' : bidanAmount === nominal && allVisit && bidanId ? 'ok' : 'fix';
-      out.push({ t, hcItems, ruledItems, bidanAmount, bidanId, status });
+      const status = !ruledItems.length ? 'norule' : bidanAmount === expected && allVisit && bidanId ? 'ok' : 'fix';
+      out.push({ t, hcItems, ruledItems, expected, bidanAmount, bidanId, status });
     }
     return out.sort((a, b) => (a.t.date + a.t.id).localeCompare(b.t.date + b.t.id));
   }
@@ -83,19 +90,19 @@
    * Draft simpan ulang satu transaksi: tindakan homecare berjasa bidan dihitung ulang dengan aturan
    * terbaru (tanpa lineId → pembagian baru) dan bidan pelaksana diisi; tindakan lain tidak diubah.
    */
-  function draftFor(t, bidanId, services, nominal) {
+  function draftFor(t, bidanId, services) {
     const svcMap = new Map(services.map((s) => [s.id, s]));
     return {
       date: t.date, patient: t.patient, patientCode: t.patientCode || '', note: t.note || '',
       items: t.items.map((i) => {
         const base = { serviceId: i.serviceId, qty: i.qty, price: i.price, withDoctor: !!i.withDoctor, performers: Object.assign({}, i.performers) };
-        if (!ruled(svcMap.get(i.serviceId), nominal)) return Object.assign(base, { lineId: i.lineId });
+        if (!ruled(svcMap.get(i.serviceId))) return Object.assign(base, { lineId: i.lineId });
         base.performers.bidan = bidanId;
         return base;
       })
     };
   }
 
-  NP.hc = { DEFAULT_NOMINAL, isHomecare, planService, ruled, visits, draftFor, withRule };
+  NP.hc = { DEFAULT_NOMINAL, isHomecare, planService, ruled, ruleValue, visits, draftFor, withRule };
   if (typeof module !== 'undefined' && module.exports) module.exports = NP;
 })(typeof globalThis !== 'undefined' ? globalThis : window);

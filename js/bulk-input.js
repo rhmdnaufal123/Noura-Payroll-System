@@ -558,7 +558,8 @@
 
 
   /* ===================== Jasa bidan homecare per kunjungan ===================== */
-  const hcs = { nominal: NP.hc ? NP.hc.DEFAULT_NOMINAL : 100000, skip: new Set(), force: new Set(), bidan: '', perRow: new Map(), unsel: new Set(), tbl: {} };
+  // amounts: nominal jasa bidan per tindakan (diatur satu per satu); fill: nominal bawaan diubah → berlaku untuk semua
+  const hcs = { nominal: NP.hc ? NP.hc.DEFAULT_NOMINAL : 100000, fill: false, amounts: new Map(), skip: new Set(), force: new Set(), bidan: '', perRow: new Map(), unsel: new Set(), tbl: {} };
   const HC_STATUS = {
     ok: ['Sudah sesuai', 'flag-done'],
     change: ['Akan diubah', 'flag-dup'],
@@ -574,17 +575,18 @@
     const empMap = new Map(employees.map((e) => [e.id, e]));
     const bidans = staffFor(employees, 'bidan');
     const nominal = hcs.nominal;
+    const amountOf = (s) => (hcs.amounts.has(s.id) ? hcs.amounts.get(s.id) : !hcs.fill && NP.hc.ruleValue(s) ? NP.hc.ruleValue(s) : nominal);
     const rerender = async () => {
       const y = window.scrollY;
       await renderHc(outer);
       window.scrollTo(0, y);
     };
     const hcSvc = services.filter((s) => s.active !== false && NP.hc.isHomecare(s));
-    const plans = hcSvc.map((s) => NP.hc.planService(s, nominal));
+    const plans = hcSvc.map((s) => Object.assign(NP.hc.planService(s, amountOf(s)), { amount: amountOf(s) }));
     const picked = (p) => (p.status === 'change' && !hcs.skip.has(p.service.id)) || (p.status === 'doctor' && hcs.force.has(p.service.id));
     const toSave = plans.filter(picked);
     const range = u.monthRange(st.period);
-    const V = NP.hc.visits(trxs, services, { start: range.start, end: range.end, nominal });
+    const V = NP.hc.visits(trxs, services, { start: range.start, end: range.end });
     const bidanOf = (v) => hcs.perRow.get(v.t.id) || v.bidanId || hcs.bidan || '';
     const editState = (v) => {
       try {
@@ -603,20 +605,20 @@
     host.innerHTML = `
       <div class="card">
         <div class="card-head"><h3>1. Aturan jasa bidan homecare</h3></div>
-        <p class="muted small">Bidan pelaksana mendapat nominal tetap <b>sekali per kunjungan</b> (satu struk/transaksi) yang berisi tindakan homecare, berapa pun jumlah tindakannya. Sisa harga masuk ke unit. Tindakan yang seluruhnya untuk dokter — mis. <b>Pemeriksaan Dokter Umum HC</b> Rp300.000 — tidak diubah. Aturan disimpan di Master Tindakan, sehingga impor file POS berikutnya otomatis mengikutinya.</p>
+        <p class="muted small">Jasa bidan homecare dihitung <b>sekali per transaksi</b> (satu struk/kunjungan) yang berisi tindakan homecare, berapa pun jumlah tindakannya. Nominalnya dapat diatur <b>satu per satu</b> untuk setiap tindakan di kolom <b>Jasa bidan / kunjungan</b>; bila satu transaksi berisi beberapa tindakan homecare, bidan tetap dibayar sekali sesuai nominal tindakan pertama pada struk. Sisa harga masuk ke unit. Tindakan yang seluruhnya untuk dokter — mis. <b>Pemeriksaan Dokter Umum HC</b> Rp300.000 — tidak diubah. Aturan disimpan di Master Tindakan, sehingga impor file POS berikutnya otomatis mengikutinya.</p>
         <div class="grid-3">
-          <label class="field"><span>Jasa bidan per kunjungan</span><div class="input-prefix"><span>Rp</span><input id="hc-nominal" data-money inputmode="numeric" value="${ui.moneyVal(nominal)}"></div></label>
+          <label class="field"><span>Isi semua tindakan dengan</span><div class="input-prefix"><span>Rp</span><input id="hc-nominal" data-money inputmode="numeric" value="${ui.moneyVal(nominal)}"></div><small class="muted">Ubah nominal per tindakan di kolom <b>Jasa bidan / kunjungan</b>.</small></label>
         </div>
-        ${hcSvc.length ? `<div class="table-wrap table-cards"><table class="tbl hc-svc"><thead><tr><th><span class="sr-only">Pilih</span></th><th>Tindakan homecare</th><th class="ta-right">Harga</th><th>Pembagian sekarang</th><th>Status</th></tr></thead><tbody>${plans
+        ${hcSvc.length ? `<div class="table-wrap table-cards"><table class="tbl hc-svc"><thead><tr><th><span class="sr-only">Pilih</span></th><th>Tindakan homecare</th><th class="ta-right">Harga</th><th>Jasa bidan / kunjungan</th><th>Status</th></tr></thead><tbody>${plans
           .map((p) => {
             const s = p.service;
             const can = p.status === 'change' || p.status === 'doctor';
             const st2 = HC_STATUS[p.status];
             return `<tr data-hcs="${u.esc(s.id)}"><td data-label="Pilih"><input type="checkbox" data-hcpick="${u.esc(s.id)}" ${picked(p) || p.status === 'ok' ? 'checked' : ''} ${can && canMaster ? '' : 'disabled'} aria-label="Terapkan pada ${u.esc(s.name)}"></td>
-              <td data-label="Tindakan"><b>${u.esc(s.name)}</b><small class="block muted">${u.esc(s.code || '')} · ${u.esc(s.category || '')}</small></td>
+              <td data-label="Tindakan"><b>${u.esc(s.name)}</b><small class="block muted">${u.esc(s.code || '')} · ${u.esc(s.category || '')}</small><div class="share-chips">${NP.svc.shareSummary(s, empMap)}</div></td>
               <td data-label="Harga" class="ta-right">${u.rp(s.price)}</td>
-              <td data-label="Pembagian sekarang"><div class="share-chips">${NP.svc.shareSummary(s, empMap)}</div></td>
-              <td data-label="Status"><span class="flag ${st2[1]}">${st2[0]}</span>${p.status === 'short' || (p.status === 'doctor' && hcs.force.has(s.id) && p.errors.length) ? `<small class="block muted">${u.esc(p.errors.join(' '))}</small>` : ''}${p.status === 'change' || (p.status === 'doctor' && hcs.force.has(s.id)) ? `<small class="block muted">Menjadi: Bidan pelaksana ${u.rp(nominal)} per kunjungan</small>` : ''}</td></tr>`;
+              <td data-label="Jasa bidan / kunjungan"><div class="input-prefix hc-amt"><span>Rp</span><input data-hcamt="${u.esc(s.id)}" data-money inputmode="numeric" value="${ui.moneyVal(p.amount)}" ${canMaster && (p.status !== 'doctor' || hcs.force.has(s.id)) ? '' : 'disabled'} aria-label="Jasa bidan per kunjungan ${u.esc(s.name)}"></div></td>
+              <td data-label="Status"><span class="flag ${st2[1]}">${st2[0]}</span>${p.status === 'short' || (p.status === 'doctor' && hcs.force.has(s.id) && p.errors.length) ? `<small class="block muted">${u.esc(p.errors.join(' '))}</small>` : ''}${p.status === 'change' || (p.status === 'doctor' && hcs.force.has(s.id)) ? `<small class="block muted">menjadi ${u.rp(p.amount)} per kunjungan</small>` : ''}</td></tr>`;
           })
           .join('')}</tbody></table></div>
         <div class="form-actions">${canMaster ? `<button type="button" class="btn btn-primary" data-hc="save-rule" ${toSave.length && !toSave.some((p) => p.errors.length) ? '' : 'disabled'}>${ui.icon('check')}<span>${toSave.length ? 'Simpan aturan ke ' + toSave.length + ' tindakan' : 'Aturan sudah tersimpan'}</span></button>` : '<small class="muted">Hanya Administrator yang dapat mengubah Master Tindakan.</small>'}</div>`
@@ -630,14 +632,14 @@
           ${ui.stat('Kunjungan homecare', u.num(rows.length), { icon: 'users', sub: u.periodLabel(st.period) })}
           ${ui.stat('Sudah sesuai', u.num(rows.filter((v) => v.status === 'ok').length), { icon: 'check' })}
           ${ui.stat('Perlu diterapkan', u.num(fixable.length), { icon: 'warn', sub: rows.filter((v) => v.lock).length ? rows.filter((v) => v.lock).length + ' terkunci (dilewati)' : '' })}
-          ${ui.stat('Jasa bidan homecare', u.rp(totBidan), { icon: 'wallet', sub: fixable.length ? 'setelah diterapkan ' + u.rp(totBidan - u.sum(chosen, (v) => v.bidanAmount) + chosen.length * nominal) : '' })}
+          ${ui.stat('Jasa bidan homecare', u.rp(totBidan), { icon: 'wallet', sub: fixable.length ? 'setelah diterapkan ' + u.rp(totBidan - u.sum(chosen, (v) => v.bidanAmount) + u.sum(chosen, (v) => v.expected)) : '' })}
         </div>
         <div class="grid-3">
           <label class="field"><span>Bidan pelaksana default</span><select id="hc-bidan">${ui.options(bidans.map((e) => [e.id, e.name]), hcs.bidan, '— pilih bidan —')}</select>${!bidans.length && NP.sec.can('employees.edit') ? '<a class="small" href="#/employees?add=bidan">+ Tambah bidan di Data Karyawan</a>' : ''}</label>
         </div>
         <div id="hc-table"></div>
         <div class="form-actions">
-          ${canEdit ? `<button type="button" class="btn btn-primary" data-hc="apply" ${chosen.length && !missingBidan.length ? '' : 'disabled'}>${ui.icon('check')}<span>Terapkan ${u.rp(nominal)} per kunjungan${chosen.length ? ' (' + u.num(chosen.length) + ')' : ''}</span></button>` : '<small class="muted">Hanya Administrator / Keuangan yang dapat mengubah transaksi.</small>'}
+          ${canEdit ? `<button type="button" class="btn btn-primary" data-hc="apply" ${chosen.length && !missingBidan.length ? '' : 'disabled'}>${ui.icon('check')}<span>Terapkan jasa bidan per kunjungan${chosen.length ? ' (' + u.num(chosen.length) + ')' : ''}</span></button>` : '<small class="muted">Hanya Administrator / Keuangan yang dapat mengubah transaksi.</small>'}
         </div>
         ${missingBidan.length ? `<p class="muted small ta-right">${u.num(missingBidan.length)} kunjungan belum memiliki bidan — pilih bidan default atau per baris.</p>` : ''}
       </div>`;
@@ -649,7 +651,7 @@
         { key: 'patient', label: 'Pasien / struk', value: (v) => v.t.patient || '', render: (v) => `${u.esc(v.t.patient || '-')}<small class="block muted">${u.esc((v.t.externalRef || v.t.id).replace(/^POS:/, ''))}</small>` },
         { key: 'items', label: 'Tindakan homecare', sortable: false, render: (v) => v.hcItems.map((i) => u.esc(i.serviceName) + (i.qty > 1 ? ' ×' + i.qty : '')).join('<br>') },
         { key: 'bidan', label: 'Bidan', sortable: false, render: (v) => (v.status === 'fix' && !v.lock ? `<select data-hcb="${u.esc(v.t.id)}" aria-label="Bidan ${u.esc(v.t.id)}">${ui.options(bidans.map((e) => [e.id, e.name]), bidanOf(v), '— pilih bidan —')}</select>` : u.esc((empMap.get(v.bidanId) || {}).name || '-')) },
-        { key: 'status', label: 'Jasa bidan', value: (v) => v.bidanAmount, render: (v) => `<b>${u.rp(v.bidanAmount)}</b><br>` + (v.status === 'ok' ? '<span class="flag flag-done">Sudah sesuai</span>' : v.status === 'norule' ? '<span class="flag flag-db">Tanpa jasa bidan</span><small class="block muted">tindakan belum memakai aturan</small>' : v.lock ? `<span class="flag flag-zero">Dilewati: ${u.esc(v.lock)}</span>` : `<span class="flag flag-low">Perlu diterapkan</span>`) }
+        { key: 'status', label: 'Jasa bidan', value: (v) => v.bidanAmount, render: (v) => `<b>${u.rp(v.bidanAmount)}</b>${v.status === 'fix' && v.expected ? ' <small class="muted">→ ' + u.rp(v.expected) + '</small>' : ''}<br>` + (v.status === 'ok' ? '<span class="flag flag-done">Sudah sesuai</span>' : v.status === 'norule' ? '<span class="flag flag-db">Tanpa jasa bidan</span><small class="block muted">tindakan belum memakai aturan</small>' : v.lock ? `<span class="flag flag-zero">Dilewati: ${u.esc(v.lock)}</span>` : `<span class="flag flag-low">Perlu diterapkan</span>`) }
       ],
       rows,
       sortKey: 'date',
@@ -663,6 +665,12 @@
       const t = e.target;
       if (t.id === 'hc-nominal') {
         hcs.nominal = u.toInt(t.value);
+        hcs.fill = true; // berlaku untuk semua tindakan
+        hcs.amounts.clear();
+        return rerender();
+      }
+      if (t.dataset.hcamt) {
+        hcs.amounts.set(t.dataset.hcamt, u.toInt(t.value));
         return rerender();
       }
       if (t.id === 'hc-month') {
@@ -693,7 +701,7 @@
       const a = e.target.closest('[data-hc]');
       if (!a || a.disabled) return;
       if (a.dataset.hc === 'save-rule') {
-        const ok = await ui.confirm({ title: 'Simpan aturan jasa bidan homecare', html: `Ubah pembagian <b>${toSave.length} tindakan homecare</b> menjadi: Bidan pelaksana <b>${u.rp(nominal)} per kunjungan</b>, sisanya ke unit?<br><small>${toSave.map((p) => u.esc(p.service.name)).join(', ')}</small><br><small>Transaksi yang sudah tersimpan tidak berubah sampai diterapkan di bagian 2.</small>`, okLabel: 'Simpan aturan' });
+        const ok = await ui.confirm({ title: 'Simpan aturan jasa bidan homecare', html: `Ubah pembagian <b>${toSave.length} tindakan homecare</b>: bidan pelaksana mendapat nominal per kunjungan, sisanya ke unit?<br><small>${toSave.map((p) => u.esc(p.service.name) + ' <b>' + u.rp(p.amount) + '</b>').join(', ')}</small><br><small>Transaksi yang sudah tersimpan tidak berubah sampai diterapkan di bagian 2.</small>`, okLabel: 'Simpan aturan' });
         if (!ok) return;
         try {
           await ui.busy('Menyimpan aturan…', async (msg) => {
@@ -702,21 +710,23 @@
               await NP.svc.save(p.next);
             }
           });
-          ui.toast('Aturan jasa bidan ' + u.rp(nominal) + ' per kunjungan disimpan pada ' + toSave.length + ' tindakan homecare.');
+          ui.toast('Aturan jasa bidan per kunjungan disimpan pada ' + toSave.length + ' tindakan homecare.');
+          hcs.amounts.clear();
+          hcs.fill = false;
         } catch (err) {
           ui.toast(err.message, 'error');
         }
         return rerender();
       }
       if (a.dataset.hc === 'apply') {
-        const ok = await ui.confirm({ title: 'Terapkan jasa bidan homecare', html: `Hitung ulang <b>${u.num(chosen.length)} kunjungan homecare</b> ${u.periodLabel(st.period)}: bidan mendapat <b>${u.rp(nominal)}</b> per kunjungan. Perubahan dicatat di audit log.`, okLabel: 'Terapkan' });
+        const ok = await ui.confirm({ title: 'Terapkan jasa bidan homecare', html: `Hitung ulang <b>${u.num(chosen.length)} kunjungan homecare</b> ${u.periodLabel(st.period)}: bidan mendapat jasa per kunjungan sesuai aturan tindakan (total <b>${u.rp(u.sum(chosen, (v) => v.expected))}</b>). Perubahan dicatat di audit log.`, okLabel: 'Terapkan' });
         if (!ok) return;
         const res = { done: 0, skipped: [] };
         await ui.busy('Menerapkan…', async (msg) => {
           for (const [n, v] of chosen.entries()) {
             msg('Menerapkan ' + (n + 1) + '/' + chosen.length + '…');
             try {
-              await NP.trx.save(NP.hc.draftFor(v.t, bidanOf(v), services, nominal), { editId: v.t.id });
+              await NP.trx.save(NP.hc.draftFor(v.t, bidanOf(v), services), { editId: v.t.id });
               res.done++;
             } catch (err) {
               res.skipped.push(v.t.id + ': ' + err.message);
