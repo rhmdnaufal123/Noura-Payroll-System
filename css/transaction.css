@@ -228,7 +228,7 @@
 .sch-notes ul { margin: 4px 0; padding-left: 18px; }
 .chip-check { display: inline-flex; cursor: pointer; }
 .chip-check input { position: absolute; opacity: 0; width: 1px; height: 1px; }
-.chip-check span { display: inline-grid; place-items: center; min-width: 34px; min-height: 30px; padding: 0 6px; border-radius: 8px; border: 1px solid var(--border-strong); font-size: 12px; font-weight: 600; color: var(--text-2); background: var(--surface); }
+.chip-check span { display: inline-grid; place-items: center; min-width: 40px; min-height: 30px; padding: 0 6px; border-radius: 8px; border: 1px solid var(--border-strong); font-size: 12px; font-weight: 600; color: var(--text-2); background: var(--surface); }
 .chip-check input:checked + span { background: color-mix(in srgb, var(--primary) 14%, var(--surface)); border-color: var(--primary); color: var(--primary); }
 .chip-check.off input:checked + span { background: color-mix(in srgb, var(--danger) 12%, var(--surface)); border-color: var(--danger); color: var(--danger); }
 .chip-check input:focus-visible + span { outline: 2px solid var(--primary); outline-offset: 1px; }
@@ -243,7 +243,7 @@
 .sch-days td span + span { margin-left: 6px; }
 .txt-danger { color: var(--danger); font-weight: 700; }
 .sch-plist { display: grid; border: 1px solid var(--border); border-radius: var(--radius-sm); }
-.sch-p { display: grid; grid-template-columns: minmax(200px, 240px) 1fr; gap: 8px 16px; align-items: start; padding: 10px 12px; border-bottom: 1px solid var(--border); }
+.sch-p { display: grid; grid-template-columns: minmax(160px, 200px) 1fr; gap: 8px 16px; align-items: start; padding: 10px 12px; border-bottom: 1px solid var(--border); }
 .sch-p:last-child { border-bottom: 0; }
 .sch-p.sch-out { grid-template-columns: 1fr; background: var(--surface-2); }
 .sch-p-head { display: flex; gap: 10px; align-items: flex-start; cursor: pointer; padding-top: 4px; }
@@ -260,3 +260,28 @@
 .sch-r.wide input { width: 150px; min-height: 34px; }
 @container (max-width: 700px) { .sch-p { grid-template-columns: 1fr; } }
 @media (max-width: 760px) { .sch-p { grid-template-columns: 1fr; } }
+.sch-p-rules { display: grid; gap: 8px; }
+.sch-rg { display: grid; gap: 6px; }
+.sch-rg + .sch-rg { padding-top: 8px; border-top: 1px dashed var(--border); }
+.sch-p-rules { container-type: inline-size; }
+.sch-line { display: grid; grid-template-columns: 170px 1fr; align-items: center; gap: 4px 12px; font-size: 13.5px; }
+.sch-lbl { color: var(--text-2); font-weight: 600; font-size: 13px; }
+.sch-val { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 8px; }
+@container (max-width: 430px) { .sch-line { grid-template-columns: 1fr; } }
+.sch-line .chips { margin: 0; gap: 4px; }
+.sch-line .chips.nowrap { flex-wrap: nowrap; }
+.sch-line input[type=number] { width: 72px; min-height: 34px; text-align: center; }
+.sch-line input[data-ru] { width: 170px; min-height: 34px; }
+.sch-q { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 8px; }
+.sch-q label { display: inline-flex; align-items: center; gap: 6px; }
+.sch-sum { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 6px 12px; padding: 6px 10px; border-radius: 8px; background: var(--surface-2); font-size: 12.5px; color: var(--text-2); }
+.sch-sum .ico { width: 15px; height: 15px; vertical-align: -3px; color: var(--primary); }
+.sch-hint { display: flex; gap: 8px; align-items: flex-start; padding: 6px 10px; border-radius: 8px; background: var(--warning-50); color: var(--warning); font-size: 12.5px; font-weight: 600; }
+.sch-hint .ico { width: 16px; height: 16px; flex: none; margin-top: 1px; }
+.sch-help { margin: 0 0 12px; padding: 8px 12px; border: 1px solid var(--border); border-radius: 8px; background: var(--surface-2); font-size: 13px; }
+.sch-help summary { cursor: pointer; font-weight: 700; color: var(--primary); display: flex; align-items: center; gap: 6px; }
+.sch-help summary .ico { width: 16px; height: 16px; }
+.sch-help ul { margin: 8px 0 4px; padding-left: 18px; display: grid; gap: 4px; }
+.sch-f.under { color: var(--warning); font-weight: 700; }
+.txt-warn { color: var(--warning); font-weight: 700; }
+.sch-shifts .sch-min { width: 90px; }

@@ -1115,6 +1115,14 @@ async function step(name, fn) {
     // ketentuan: karyawan 1 libur tetap Minggu, karyawan 2 hanya shift Pagi
     await page.locator(`.sch-p[data-emp="${ids[0]}"] label:has([data-ro="0"]) span`).click();
     await page.locator(`.sch-p[data-emp="${ids[1]}"] label:has([data-rs="S"]) span`).click();
+    // karyawan 4: pembagian per minggu 3 Pagi + 3 Siang (kalimat ringkasan ikut berubah)
+    for (const c of ['P', 'S']) {
+      const old = await page.$('.sch-plist');
+      await page.fill(`.sch-p[data-emp="${ids[3]}"] [data-rq="${c}"]`, '3');
+      await page.dispatchEvent(`.sch-p[data-emp="${ids[3]}"] [data-rq="${c}"]`, 'change');
+      await page.waitForFunction((el) => !el.isConnected, old);
+    }
+    assert.ok(/per minggu 3× Pagi \+ 3× Siang/.test(await page.locator(`.sch-p[data-emp="${ids[3]}"] .sch-sum`).innerText()));
     // custom per hari: tanggal 14 butuh 2 Pagi, tanggal 15 tutup
     await page.click('[data-tab=needs]');
     await page.waitForSelector('.sch-days');
@@ -1124,6 +1132,11 @@ async function step(name, fn) {
     await page.waitForFunction((el) => !el.isConnected, old);
     old = await page.$('.sch-days');
     await page.check('.sch-days tr[data-day="15"] [data-dc]');
+    await page.waitForFunction((el) => !el.isConnected, old);
+    // Siang: minimal 1 orang bila ada yang libur
+    old = await page.$('.sch-days');
+    await page.fill('.sch-shifts tr[data-si="1"] [data-sf="min"]', '1');
+    await page.dispatchEvent('.sch-shifts tr[data-si="1"] [data-sf="min"]', 'change');
     await page.waitForFunction((el) => !el.isConnected, old);
     assert.ok(await page.locator('.sch-days tr[data-day="14"].sch-custom').count());
     await page.click('[data-act=random]');
@@ -1136,10 +1149,13 @@ async function step(name, fn) {
         d15: ids.map((e) => cell(e, 15)),
         sun0: sundays.map((d) => cell(ids[0], d)),
         s1: [...Array(28)].map((_, i) => cell(ids[1], i + 1)).filter((v) => v === 'S').length,
+        week3: [2, 3, 4, 5, 6, 7, 8].map((d) => cell(ids[3], d)).join(''),
         bad: document.querySelectorAll('.sch-c.bad').length
       };
     }, ids);
-    assert.deepStrictEqual(grid, { p14: 2, d15: ['L', 'L', 'L', 'L'], sun0: ['L', 'L', 'L', 'L'], s1: 0, bad: 0 });
+    assert.ok(grid.p14 >= 2, 'tanggal 14 minimal 2 Pagi');
+    assert.deepStrictEqual([grid.d15, grid.sun0, grid.s1, grid.bad], [['L', 'L', 'L', 'L'], ['L', 'L', 'L', 'L'], 0, 0]);
+    assert.deepStrictEqual([grid.week3.split('P').length - 1, grid.week3.split('S').length - 1], [3, 3], 'pembagian minggu 2–8: ' + grid.week3);
     assert.ok(/Belum disimpan/.test(await page.locator('#sc-state').innerText()));
     // isi manual: kuas Libur pada karyawan 3 tanggal 3
     await page.click('[data-brush="L"]');
@@ -1153,9 +1169,9 @@ async function step(name, fn) {
     assert.ok(/Tersimpan · versi 1/.test(await page.locator('#sc-state').innerText()));
     const db = await ev(async () => {
       const s = await NP.sched.get('2026-02', 'KLINIK');
-      return { n: s.config.employees.length, off: s.config.rules[s.config.employees[0]].offDays, day14: s.config.days[14], day15: s.config.days[15], filled: Object.values(s.assignments).reduce((a, c) => a + Object.keys(c).length, 0), man: s.config.manual };
+      return { n: s.config.employees.length, off: s.config.rules[s.config.employees[0]].offDays, quota: s.config.rules[s.config.employees[3]].quota, min: s.config.shifts[1].min, day14: s.config.days[14], day15: s.config.days[15], filled: Object.values(s.assignments).reduce((a, c) => a + Object.keys(c).length, 0), man: s.config.manual };
     });
-    assert.deepStrictEqual([db.n, db.off, db.day14, db.day15, db.filled], [4, [0], { need: { P: 2 } }, { need: {}, closed: true }, 4 * 28]);
+    assert.deepStrictEqual([db.n, db.off, db.quota, db.min, db.day14, db.day15, db.filled], [4, [0], { P: 3, S: 3 }, 1, { need: { P: 2 } }, { need: {}, closed: true }, 4 * 28]);
     assert.deepStrictEqual(db.man, { [ids[2]]: { 3: true } });
     assert.ok(await ev(async () => (await NP.db.all('auditLog')).some((l) => l.action === 'schedule.save')));
     const x = await download(() => page.click('.page-head [data-act=xls]'));
