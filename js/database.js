@@ -13,7 +13,7 @@
   const NP = (root.NP = root.NP || {});
 
   const DB_NAME = 'noura-payroll';
-  const DB_VERSION = 1;
+  const DB_VERSION = 2; // v2: store "schedules" (jadwal masuk)
   const STORES = {
     settings: { keyPath: 'key' },
     users: { keyPath: 'id' },
@@ -23,6 +23,7 @@
     transactions: { keyPath: 'id', indexes: [['date', 'date'], ['status', 'status']] },
     payrollRuns: { keyPath: 'id', indexes: [['period', 'period']] },
     worklogs: { keyPath: 'id', indexes: [['date', 'date'], ['employeeId', 'employeeId']] },
+    schedules: { keyPath: 'id', indexes: [['period', 'period']] },
     auditLog: { keyPath: 'id', indexes: [['ts', 'ts'], ['entityId', 'entityId']] },
     counters: { keyPath: 'key' }
   };

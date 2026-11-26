@@ -11,6 +11,7 @@
   const NAV = [
     { key: 'dashboard', label: 'Dashboard', icon: 'dashboard', perm: 'dashboard.view' },
     { key: 'employees', label: 'Data Karyawan', icon: 'users', perm: 'employees.view' },
+    { key: 'schedule', label: 'Jadwal Masuk', icon: 'clock', perm: 'schedule.view' },
     { key: 'services', label: 'Master Tindakan', icon: 'medical', perm: 'services.view' },
     { key: 'input', label: 'Input Tindakan', icon: 'input', perm: 'trx.create' },
     { key: 'bulk', label: 'Input Bulanan', icon: 'calendar', perm: 'trx.create' },
@@ -377,7 +378,7 @@
     }
     startApp();
     NP.db.subscribe(() => {
-      const busy = document.querySelector('.modal-backdrop, .busy-overlay, .page-input, .page-bulk, .page-generate');
+      const busy = document.querySelector('.modal-backdrop, .busy-overlay, .page-input, .page-bulk, .page-generate, .sch-dirty');
       if (!busy) NP.refresh();
       else ui.toast('Data diperbarui dari perangkat lain. Muat ulang halaman untuk melihat perubahan terbaru.', 'info');
     });

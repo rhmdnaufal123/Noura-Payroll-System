@@ -610,5 +610,82 @@ console.log('Jasa bidan homecare per kunjungan');
   });
 }
 
+console.log('Jadwal masuk');
+{
+  js('schedule.js');
+  const S = NP.sched;
+  const mk = (rules, extra) => {
+    const s = S.blank('2026-02', 'KLINIK');
+    s.config.employees = ['A', 'B', 'C', 'D', 'E'];
+    s.config.rules = rules || {};
+    return Object.assign(s, extra || {});
+  };
+  const dayCount = (asg, d, code) => Object.values(asg).filter((c) => c[d] === code).length;
+  test('tanggal: "3, 10-12" ↔ [3,10,11,12]; jam shift malam melewati tengah malam', () => {
+    assert.deepStrictEqual(S.parseDays('3, 10-12, 40, x', 28), [3, 10, 11, 12]);
+    assert.strictEqual(S.fmtDays([3, 10, 11, 12, 20, 21]), '3, 10–12, 20, 21');
+    assert.strictEqual(S.hours({ start: '21:00', end: '07:00' }), 10);
+    assert.strictEqual(S.hours({ start: '07:00', end: '14:00' }), 7);
+  });
+  test('buat jadwal merata: kebutuhan P1+S1 terpenuhi setiap hari, beban kerja merata, ketentuan dipatuhi', () => {
+    const s = mk({ A: { offDays: [0] }, B: { shifts: ['P'] }, C: { unavailable: [10, 11, 12] }, D: { maxRun: 3 }, E: { maxWeek: 3 } });
+    const g = S.generate(s, { seed: 42 });
+    assert.deepStrictEqual(g.warnings, []);
+    for (let d = 1; d <= 28; d++) assert.deepStrictEqual([dayCount(g.assignments, d, 'P'), dayCount(g.assignments, d, 'S')], [1, 1], 'tanggal ' + d);
+    s.assignments = g.assignments;
+    const c = S.check(s);
+    assert.strictEqual(c.short, 0);
+    assert.strictEqual(c.issues, 0, JSON.stringify(Object.values(c.byEmp).map((x) => x.issues)));
+    const works = s.config.employees.map((e) => c.byEmp[e].work);
+    assert.ok(Math.max(...works) - Math.min(...works) <= 3, 'merata: ' + works);
+    for (let d = 1; d <= 28; d++) if (S.weekday('2026-02', d) === 0) assert.strictEqual(g.assignments.A[d], 'L', 'A libur tiap Minggu');
+    assert.ok(!Object.values(g.assignments.B).includes('S'), 'B hanya shift Pagi');
+    assert.deepStrictEqual([10, 11, 12].map((d) => g.assignments.C[d]), ['L', 'L', 'L']);
+  });
+  test('acak: seed sama → hasil sama, seed berbeda → berbeda; mode acak penuh tetap mematuhi ketentuan', () => {
+    const s = mk({ A: { offDays: [6, 0] } });
+    assert.deepStrictEqual(S.generate(s, { seed: 7 }).assignments, S.generate(s, { seed: 7 }).assignments);
+    assert.notDeepStrictEqual(S.generate(s, { seed: 7 }).assignments, S.generate(s, { seed: 8 }).assignments);
+    const g = S.generate(s, { seed: 9, mode: 'random' });
+    s.assignments = g.assignments;
+    assert.strictEqual(S.check(s).issues, 0);
+    assert.strictEqual(S.check(s).short, 0);
+  });
+  test('custom per hari: tanggal 14 butuh 3 Pagi, tanggal 15 tutup; isian manual dipertahankan', () => {
+    const s = mk({}, {});
+    s.config.days = { 14: { need: { P: 3 } }, 15: { closed: true } };
+    s.assignments = { A: { 1: 'S' } };
+    s.config.manual = { A: { 1: true } };
+    const g = S.generate(s, { seed: 3 });
+    assert.strictEqual(dayCount(g.assignments, 14, 'P'), 3);
+    assert.strictEqual(dayCount(g.assignments, 14, 'S'), 1);
+    assert.ok(Object.values(g.assignments).every((c) => c[15] === 'L'), 'tanggal tutup');
+    assert.strictEqual(g.assignments.A[1], 'S', 'isian manual');
+    assert.notStrictEqual(S.generate(s, { seed: 3, keepManual: false }).assignments.A[1], undefined);
+  });
+  test('kekurangan petugas dilaporkan; pelanggaran isian manual ditandai', () => {
+    const s = mk({ A: { shifts: ['P'] }, B: { shifts: ['P'] }, C: { shifts: ['P'] }, D: { shifts: ['P'] }, E: { shifts: ['P'] } });
+    const g = S.generate(s, { seed: 1 });
+    assert.strictEqual(g.warnings.length, 28, 'tidak ada yang boleh shift Siang');
+    assert.ok(g.warnings.every((w) => w.code === 'S' && w.missing === 1));
+    s.assignments = g.assignments;
+    s.assignments.A[2] = 'S';
+    const c = S.check(s);
+    assert.ok(c.byEmp.A.issues.some((i) => i.day === 2 && /tidak diizinkan/.test(i.msg)));
+    assert.strictEqual(c.short, 27);
+  });
+  test('validasi sebelum simpan: kode shift, tanggal di luar bulan, karyawan di luar jadwal', () => {
+    const s = mk();
+    assert.deepStrictEqual(S.validate(s), []);
+    s.assignments = { A: { 29: 'P', 3: 'M' }, Z: { 1: 'P' } };
+    s.config.shifts.push({ code: 'L', name: 'x', start: '07:00', end: '08:00' });
+    const e = S.validate(s).join(' | ');
+    assert.ok(/Kode shift "L"/.test(e) && /Tanggal 29/.test(e) && /Kode "M"/.test(e) && /Karyawan Z/.test(e), e);
+    const p = S.payload(Object.assign(mk(), { assignments: { A: { 1: 'P', 2: '' }, Z: { 1: 'P' } } }));
+    assert.deepStrictEqual(p.assignments, { A: { 1: 'P' } });
+    assert.strictEqual(p.id, 'JDW-202602-KLINIK');
+  });
+}
+
 console.log('\n' + passed + ' lulus, ' + failures.length + ' gagal');
 if (failures.length) process.exit(1);

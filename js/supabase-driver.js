@@ -21,11 +21,11 @@
   };
 
   const SETTING_KEYS = ['company', 'payroll', 'tax', 'bpjs', 'salesBonus', 'slip', 'numbering', 'backup', 'security'];
-  const STORES = ['settings', 'users', 'employees', 'components', 'services', 'transactions', 'payrollRuns', 'worklogs', 'auditLog', 'counters'];
+  const STORES = ['settings', 'users', 'employees', 'components', 'services', 'transactions', 'payrollRuns', 'worklogs', 'schedules', 'auditLog', 'counters'];
   const ORDER = {
     app_settings: 'key', business_units: 'code', positions: 'id', departments: 'id', employees: 'id', employee_bank_accounts: 'employee_id',
     salary_components: 'code', service_master: 'id', service_revenue_rules: 'id', service_transactions: 'id', service_transaction_items: 'id',
-    service_transaction_allocations: 'id', payroll_periods: 'id', payroll_records: 'id', payroll_details: 'id', payslips: 'id', worklogs: 'id',
+    service_transaction_allocations: 'id', payroll_periods: 'id', payroll_records: 'id', payroll_details: 'id', payslips: 'id', worklogs: 'id', work_schedules: 'id',
     users: 'id', audit_logs: 'id', doc_counters: 'key'
   };
 
@@ -208,6 +208,9 @@
       async worklogs() {
         return (await fetchAll('worklogs')).map((w) => ({ id: w.id, employeeId: w.employee_id, date: w.work_date, shifts: num(w.shifts), sessions: num(w.sessions), note: w.note }));
       },
+      async schedules() {
+        return (await fetchAll('work_schedules')).map((w) => ({ id: w.id, period: w.period, unit: w.unit, title: w.title, config: w.config || {}, assignments: w.assignments || {}, version: w.version, updatedAt: ts(w.updated_at) }));
+      },
       async auditLog() {
         const data = await q(sb.from('audit_logs').select('id,ts,username,action,entity,entity_id,detail').order('id', { ascending: false }).limit(3000));
         return data.map((l) => ({ id: l.id, ts: ts(l.ts), user: l.username, userName: l.username, action: l.action, entity: l.entity, entityId: l.entity_id, detail: l.detail }));
@@ -249,6 +252,7 @@
         if (store === 'settings') return saveSettings(obj);
         if (store === 'components') return saveComponent(obj);
         if (store === 'worklogs') return driver.saveWorklog(obj);
+        if (store === 'schedules') return driver.saveSchedule(obj);
         if (store === 'auditLog') return driver.log(obj.action, obj.entity, obj.entityId, obj.detail);
         if (store === 'users') return driver.adminUpdateUser(obj);
         throw new Error('Penyimpanan langsung "' + store + '" tidak diizinkan; gunakan proses aplikasi.');
@@ -261,6 +265,7 @@
         cache.clear();
         if (store === 'components') return q(sb.from('salary_components').delete().eq('code', key));
         if (store === 'worklogs') return driver.deleteWorklog(key);
+        if (store === 'schedules') return driver.deleteSchedule(key);
         if (store === 'users') return driver.adminUsers({ action: 'delete', id: key });
         throw new Error('Penghapusan langsung "' + store + '" tidak diizinkan.');
       },
@@ -370,6 +375,16 @@
       saveService: (s) => rpc('save_service', { p: { id: s.id || null, name: s.name, category: s.category, unit: s.unit, price: s.price, active: s.active, notes: s.notes || '', shares: s.shares, doctorShares: s.doctorShares || [], overrides: s.overrides || [] } }),
       setServiceActive: (id, active) => rpc('set_service_active', { p_id: id, p_active: active }),
       deleteService: (id) => rpc('delete_service', { p_id: id }),
+      async saveSchedule(s) {
+        lastWrite = Date.now();
+        cache.clear();
+        return rpc('save_work_schedule', { p: { period: s.period, unit: s.unit, title: s.title || '', config: s.config, assignments: s.assignments, version: s.version == null ? null : s.version } });
+      },
+      async deleteSchedule(id) {
+        lastWrite = Date.now();
+        cache.clear();
+        return rpc('delete_work_schedule', { p_id: id });
+      },
       deleteTransactions: (ids, reason) => rpc('delete_service_transactions', { p_ids: ids, p_reason: reason }),
       /** Simpan banyak transaksi dalam satu transaksi database (input bulanan / impor POS). */
       bulkSaveTransactions: (list, source) =>
@@ -414,7 +429,7 @@
       subscribe(onChange) {
         try {
           const ch = sb.channel('noura-changes');
-          ['service_transactions', 'payroll_periods', 'employees', 'service_master'].forEach((t) =>
+          ['service_transactions', 'payroll_periods', 'employees', 'service_master', 'work_schedules'].forEach((t) =>
             ch.on('postgres_changes', { event: '*', schema: 'public', table: t }, () => {
               cache.clear();
               if (Date.now() - lastWrite > 4000) onChange(t);

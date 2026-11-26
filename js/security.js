@@ -96,6 +96,8 @@
     'analysis.view': ALL,
     'income.view': AF,
     'worklog.edit': AF,
+    'schedule.view': ALL,
+    'schedule.edit': AFO,
     'payroll.config': A,
     'payroll.run': AF,
     'payroll.approve': AF,

@@ -395,6 +395,35 @@ async function step(name, fn) {
     assert.deepStrictEqual(r2, [{ with_doctor: false, category: 'klinik', amount: 120000 }, { with_doctor: false, category: 'bidan', amount: 30000 }]);
   });
 
+  await step('jadwal masuk di server: admin membuat & menyimpan, operasional di perangkat lain mengubah, versi lama ditolak', async () => {
+    await go(A, 'schedule?month=2026-03&unit=ALL&tab=people');
+    await A.waitForSelector('.sch-plist');
+    for (const id of [ID.bidan, ID.kasir]) {
+      const old = await A.$('.sch-plist');
+      await A.check(`[data-inc="${id}"]`);
+      await A.waitForFunction((el) => !el.isConnected, old);
+    }
+    await A.click('[data-act=random]');
+    await A.waitForSelector('.sch-grid');
+    await toastAfter(A, () => A.click('[data-act=save]'), /disimpan \(versi 1\)/, 30000);
+    const r = await sql("select id, version, config -> 'employees' emps, (select count(*) from jsonb_each(assignments) e, jsonb_each(e.value))::int cells from public.work_schedules");
+    assert.deepStrictEqual(r, [{ id: 'JDW-202603-ALL', version: 1, emps: [ID.bidan, ID.kasir], cells: 62 }]);
+    // perangkat A mulai mengubah (belum disimpan) ...
+    await A.click('[data-brush="L"]');
+    await A.click(`.sch-c button[data-e="${ID.kasir}"][data-d="5"]`);
+    // ... sementara operasional di perangkat B membuka jadwal yang sama, mengubah & menyimpan
+    await go(B, 'schedule?month=2026-03&unit=ALL');
+    await B.waitForSelector('.sch-grid');
+    assert.strictEqual(await B.locator('.sch-grid tbody tr').count(), 2, 'B melihat jadwal buatan A');
+    await B.click('[data-brush="L"]');
+    await B.click(`.sch-c button[data-e="${ID.bidan}"][data-d="2"]`);
+    await toastAfter(B, () => B.click('[data-act=save]'), /versi 2/, 30000);
+    // A menyimpan dengan versi lama → ditolak, tidak menimpa perubahan B
+    await toastAfter(A, () => A.click('[data-act=save]'), /diubah oleh pengguna lain/, 30000);
+    const v = await sql("select version, assignments -> $1 ->> '2' b2 from public.work_schedules", [ID.bidan]);
+    assert.deepStrictEqual(v, [{ version: 2, b2: 'L' }]);
+    assert.strictEqual((await sql("select count(*)::int n from public.audit_logs where action = 'schedule.save'"))[0].n, 2);
+  });
   await step('viewer hanya melihat laporan; tidak dapat membaca slip/penggajian rinci', async () => {
     await logout(B);
     await login(B, 'viewer@noura.test', 'Viewer#2026');
