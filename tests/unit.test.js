@@ -669,10 +669,54 @@ console.log('Jadwal masuk');
     assert.strictEqual(g.warnings.length, 28, 'tidak ada yang boleh shift Siang');
     assert.ok(g.warnings.every((w) => w.code === 'S' && w.missing === 1));
     s.assignments = g.assignments;
-    s.assignments.A[2] = 'S';
+    const off = Object.keys(g.assignments).find((e) => g.assignments[e][2] === 'L');
+    s.assignments[off][2] = 'S';
     const c = S.check(s);
-    assert.ok(c.byEmp.A.issues.some((i) => i.day === 2 && /tidak diizinkan/.test(i.msg)));
+    assert.ok(c.byEmp[off].issues.some((i) => i.day === 2 && /tidak diizinkan/.test(i.msg)));
     assert.strictEqual(c.short, 27);
+  });
+  test('minimal saat ada yang libur: Siang ideal 2 boleh 1 orang → tidak dianggap kurang', () => {
+    const s = mk({ A: { offDays: [1] } });
+    s.config.employees = ['A', 'B', 'C'];
+    for (let w = 0; w < 7; w++) s.config.weekly[w] = { P: 1, S: 2 };
+    const strict = S.generate(s, { seed: 5 });
+    assert.ok(strict.warnings.length > 0, 'tanpa minimal: Senin kurang Siang');
+    s.config.shifts[1].min = 1;
+    const g = S.generate(s, { seed: 5 });
+    assert.deepStrictEqual(g.warnings, []);
+    s.assignments = g.assignments;
+    const c = S.check(s);
+    assert.strictEqual(c.short, 0);
+    assert.ok(c.under > 0, 'Siang di bawah ideal tercatat sebagai "kurang dari ideal"');
+    const mon = [2, 9, 16, 23];
+    for (const d of mon) assert.deepStrictEqual([dayCount(g.assignments, d, 'P'), dayCount(g.assignments, d, 'S')], [1, 1], 'Senin ' + d);
+  });
+  test('pembagian per minggu 3 Pagi + 3 Siang dan libur maks. 2 hari per bulan', () => {
+    const s = mk({ A: { quota: { P: 3, S: 3 } }, B: { maxOff: 2, maxWeek: 0, maxRun: 0 } });
+    s.config.employees = ['A', 'B', 'C', 'D', 'E', 'F', 'G'];
+    for (let w = 0; w < 7; w++) s.config.weekly[w] = { P: 2, S: 2 };
+    const g = S.generate(s, { seed: 11 });
+    // minggu penuh di Februari 2026: 2–8, 9–15, 16–22
+    for (const [a, b] of [[2, 8], [9, 15], [16, 22]]) {
+      const w = [];
+      for (let d = a; d <= b; d++) w.push(g.assignments.A[d]);
+      assert.deepStrictEqual([w.filter((v) => v === 'P').length, w.filter((v) => v === 'S').length], [3, 3], 'minggu ' + a + '–' + b + ': ' + w.join(''));
+    }
+    const offB = Object.values(g.assignments.B).filter((v) => v === 'L').length;
+    assert.ok(offB <= 2, 'B libur ' + offB + ' hari');
+    s.assignments = g.assignments;
+    const c = S.check(s);
+    assert.deepStrictEqual([c.byEmp.A.issues, c.byEmp.B.issues], [[], []]);
+    assert.strictEqual(c.short, 0);
+    // pelanggaran ditandai bila diubah manual
+    s.assignments.B = Object.assign({}, s.assignments.B, { 1: 'L', 2: 'L', 3: 'L' });
+    s.assignments.A = Object.assign({}, s.assignments.A);
+    for (let d = 2; d <= 5; d++) s.assignments.A[d] = 'P';
+    const c2 = S.check(s);
+    assert.ok(c2.byEmp.B.issues.some((i) => /libur lebih dari 2 hari/.test(i.msg)));
+    assert.ok(c2.byEmp.A.issues.some((i) => /Pagi lebih dari 3 kali/.test(i.msg)));
+    assert.ok(/per minggu 3× Pagi \+ 3× Siang/.test(S.describeRule(s, S.ruleOf(s, 'A'))));
+    assert.ok(/libur maks\. 2 hari\/bulan/.test(S.describeRule(s, S.ruleOf(s, 'B'))));
   });
   test('validasi sebelum simpan: kode shift, tanggal di luar bulan, karyawan di luar jadwal', () => {
     const s = mk();

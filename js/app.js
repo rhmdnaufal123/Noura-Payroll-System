@@ -177,6 +177,7 @@
           <div class="topbar-right">
             <span class="period-chip" id="period-chip" title="Periode gaji aktif">${ui.icon('calendar')}<span></span></span>
             <button class="icon-btn" id="backup-bell" title="Pengingat backup" hidden>${ui.icon('warn')}</button>
+            <button class="icon-btn" id="reload-btn" title="Muat ulang halaman" aria-label="Muat ulang halaman">${ui.icon('refresh')}</button>
             <button class="icon-btn" id="theme-toggle" title="Tema terang/gelap">${ui.icon('eye')}</button>
             <div class="user-menu">
               <button class="user-btn" id="user-btn"><span class="avatar">${u.esc((usr.name || '?').slice(0, 1).toUpperCase())}</span><span class="user-meta"><b>${u.esc(usr.name)}</b><small>${u.esc(NP.sec.ROLES[usr.role].label)}</small></span></button>
@@ -218,7 +219,28 @@
       route();
     };
     ui.$('#backup-bell').onclick = () => NP.go('settings', { tab: 'backup' });
+    ui.$('#reload-btn').onclick = reloadPage;
   }
+
+  /** Muat ulang halaman (berguna di iPad/HP mode aplikasi yang tidak punya tombol reload browser).
+   *  Mengambil versi aplikasi & data terbaru; tetap login dan kembali ke halaman yang sama. */
+  async function reloadPage() {
+    const btn = ui.$('#reload-btn');
+    if (NP.sched && NP.sched.hasUnsaved && NP.sched.hasUnsaved()) {
+      const ok = await ui.confirm({ title: 'Muat ulang halaman', message: 'Ada perubahan Jadwal Masuk yang belum disimpan dan akan hilang bila halaman dimuat ulang. Lanjutkan?', danger: true, okLabel: 'Muat ulang' });
+      if (!ok) return;
+    }
+    if (btn) btn.classList.add('spinning');
+    try {
+      if (NP.db.invalidate) NP.db.invalidate();
+      if ('serviceWorker' in navigator && navigator.serviceWorker.getRegistration) {
+        const reg = await navigator.serviceWorker.getRegistration();
+        if (reg) await Promise.race([reg.update().catch(() => {}), new Promise((r) => setTimeout(r, 1500))]);
+      }
+    } catch (_) {}
+    location.reload();
+  }
+  NP.reloadPage = reloadPage;
 
   function changePasswordDialog(force) {
     const usr = NP.sec.user();
