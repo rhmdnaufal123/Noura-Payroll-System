@@ -1123,6 +1123,21 @@ async function step(name, fn) {
       await page.waitForFunction((el) => !el.isConnected, old);
     }
     assert.ok(/per minggu 3× Pagi \+ 3× Siang/.test(await page.locator(`.sch-p[data-emp="${ids[3]}"] .sch-sum`).innerText()));
+    // karyawan 3: selalu Pagi setiap Senin; mengubah ketentuan tidak membuat halaman melompat ke atas
+    const rf = page.locator(`.sch-p[data-emp="${ids[2]}"] [data-rf="1"]`);
+    await rf.scrollIntoViewIfNeeded();
+    const y0 = await ev(() => window.scrollY);
+    assert.ok(y0 > 200, 'halaman sudah digulir: ' + y0);
+    let oldList = await page.$('.sch-plist');
+    await rf.selectOption('P');
+    await page.waitForFunction((el) => !el.isConnected, oldList);
+    await page.waitForTimeout(100);
+    assert.strictEqual(await ev(() => window.scrollY), y0, 'posisi gulir tetap');
+    oldList = await page.$('.sch-plist');
+    await page.locator(`.sch-p[data-emp="${ids[0]}"] [data-rb]`).selectOption('P');
+    await page.waitForFunction((el) => !el.isConnected, oldList);
+    assert.ok(/selalu Pagi tiap Senin/.test(await page.locator(`.sch-p[data-emp="${ids[2]}"] .sch-sum`).innerText()));
+    assert.ok(/prioritas Pagi bila ada yang libur/.test(await page.locator(`.sch-p[data-emp="${ids[0]}"] .sch-sum`).innerText()));
     // custom per hari: tanggal 14 butuh 2 Pagi, tanggal 15 tutup
     await page.click('[data-tab=needs]');
     await page.waitForSelector('.sch-days');
@@ -1150,12 +1165,14 @@ async function step(name, fn) {
         sun0: sundays.map((d) => cell(ids[0], d)),
         s1: [...Array(28)].map((_, i) => cell(ids[1], i + 1)).filter((v) => v === 'S').length,
         week3: [2, 3, 4, 5, 6, 7, 8].map((d) => cell(ids[3], d)).join(''),
+        mon2: [2, 9, 16, 23].map((d) => cell(ids[2], d)),
         bad: document.querySelectorAll('.sch-c.bad').length
       };
     }, ids);
     assert.ok(grid.p14 >= 2, 'tanggal 14 minimal 2 Pagi');
     assert.deepStrictEqual([grid.d15, grid.sun0, grid.s1, grid.bad], [['L', 'L', 'L', 'L'], ['L', 'L', 'L', 'L'], 0, 0]);
     assert.deepStrictEqual([grid.week3.split('P').length - 1, grid.week3.split('S').length - 1], [3, 3], 'pembagian minggu 2–8: ' + grid.week3);
+    assert.deepStrictEqual(grid.mon2, ['P', 'P', 'P', 'P'], 'selalu Pagi setiap Senin');
     assert.ok(/Belum disimpan/.test(await page.locator('#sc-state').innerText()));
     // isi manual: kuas Libur pada karyawan 3 tanggal 3
     await page.click('[data-brush="L"]');
@@ -1176,6 +1193,8 @@ async function step(name, fn) {
     assert.ok(await ev(async () => (await NP.db.all('auditLog')).some((l) => l.action === 'schedule.save')));
     const x = await download(() => page.click('.page-head [data-act=xls]'));
     assert.strictEqual(x.name, 'jadwal-masuk-2026-02-klinik.xlsx');
+    const pdf = await download(() => page.click('.page-head [data-act=pdf]'));
+    assert.ok(pdf.name === 'jadwal-masuk-2026-02-klinik.pdf' && pdf.size > 10000, pdf.name + ' ' + pdf.size);
   });
   await step('tombol Muat ulang: halaman dimuat ulang, tetap login di halaman yang sama; jadwal belum disimpan → konfirmasi', async () => {
     await go('analysis');

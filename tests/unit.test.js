@@ -718,6 +718,38 @@ console.log('Jadwal masuk');
     assert.ok(/per minggu 3× Pagi \+ 3× Siang/.test(S.describeRule(s, S.ruleOf(s, 'A'))));
     assert.ok(/libur maks\. 2 hari\/bulan/.test(S.describeRule(s, S.ruleOf(s, 'B'))));
   });
+  test('selalu shift tertentu per hari: Pagi setiap Senin, Siang setiap Jumat', () => {
+    const s = mk({ A: { fixed: { 1: 'P', 5: 'S' } } });
+    const g = S.generate(s, { seed: 21 });
+    assert.deepStrictEqual([2, 9, 16, 23].map((d) => g.assignments.A[d]), ['P', 'P', 'P', 'P']);
+    assert.deepStrictEqual([6, 13, 20, 27].map((d) => g.assignments.A[d]), ['S', 'S', 'S', 'S']);
+    s.assignments = g.assignments;
+    assert.deepStrictEqual(S.check(s).byEmp.A.issues, []);
+    s.assignments.A = Object.assign({}, s.assignments.A, { 2: 'S' });
+    assert.ok(S.check(s).byEmp.A.issues.some((i) => i.day === 2 && /seharusnya selalu Pagi setiap Senin/.test(i.msg)));
+    assert.ok(/selalu Pagi tiap Senin · selalu Siang tiap Jumat|selalu Pagi tiap Senin/.test(S.describeRule(s, S.ruleOf(s, 'A'))));
+  });
+  test('prioritas Pagi bila ada yang libur: karyawan bertanda masuk Pagi pada hari ada yang libur', () => {
+    const base = { A: { offDays: [1, 4] }, B: { offDays: [3] } };
+    const s = mk(Object.assign({}, base, { D: { backup: 'P' } }));
+    s.config.employees = ['A', 'B', 'C', 'D'];
+    let hit = 0;
+    for (const seed of [1, 2, 3, 4, 5]) {
+      const g = S.generate(s, { seed });
+      for (let d = 1; d <= 28; d++) {
+        const others = ['A', 'B', 'C'].some((e) => g.assignments[e][d] === 'L');
+        const v = g.assignments.D[d];
+        if (others && v !== 'L') {
+          assert.strictEqual(v, 'P', 'seed ' + seed + ' tanggal ' + d);
+          hit++;
+        }
+      }
+      s.assignments = g.assignments;
+      assert.strictEqual(S.check(s).issues, 0);
+    }
+    assert.ok(hit > 20, 'D masuk Pagi pada hari ada yang libur: ' + hit);
+    assert.ok(/prioritas Pagi bila ada yang libur/.test(S.describeRule(s, S.ruleOf(s, 'D'))));
+  });
   test('validasi sebelum simpan: kode shift, tanggal di luar bulan, karyawan di luar jadwal', () => {
     const s = mk();
     assert.deepStrictEqual(S.validate(s), []);

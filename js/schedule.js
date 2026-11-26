@@ -25,7 +25,9 @@
     { code: 'S', name: 'Siang', start: '14:00', end: '21:00', color: '#d97706' }
   ];
   // maxOff: libur maks. per bulan · quota: pembagian shift per minggu, mis. { P: 3, S: 3 }
-  const DEFAULT_RULE = { shifts: null, offDays: [], maxWeek: 6, maxRun: 6, maxMonth: 0, maxOff: 0, quota: {}, unavailable: [] };
+  // fixed: shift tetap per hari, mis. { 1: 'P' } = selalu Pagi setiap Senin
+  // backup: kode shift yang diprioritaskan untuk karyawan ini bila ada karyawan lain yang libur
+  const DEFAULT_RULE = { shifts: null, offDays: [], maxWeek: 6, maxRun: 6, maxMonth: 0, maxOff: 0, quota: {}, fixed: {}, backup: '', unavailable: [] };
 
   const clone = (o) => JSON.parse(JSON.stringify(o));
   const daysIn = (period) => new Date(+period.slice(0, 4), +period.slice(5, 7), 0).getDate();
@@ -106,6 +108,10 @@
     const q = {};
     for (const [c, v] of Object.entries(r.quota || {})) if (codes(s).includes(c) && v !== '' && v !== null && v !== undefined && u.toInt(v) >= 0) q[c] = u.toInt(v);
     r.quota = q;
+    const fx = {};
+    for (const [w, c] of Object.entries(r.fixed || {})) if (+w >= 0 && +w <= 6 && codes(s).includes(c)) fx[+w] = c;
+    r.fixed = fx;
+    r.backup = codes(s).includes(r.backup) ? r.backup : '';
     if (Array.isArray(r.shifts)) r.shifts = r.shifts.filter((c) => codes(s).includes(c));
     return r;
   }
@@ -117,6 +123,10 @@
     if (Array.isArray(r.shifts)) out.push(r.shifts.length ? 'hanya shift ' + r.shifts.map(name).join(' & ') : 'tidak dijadwalkan otomatis (tanpa shift)');
     const q = Object.entries(r.quota || {});
     if (q.length) out.push('per minggu ' + q.map(([c, n]) => n + '× ' + name(c)).join(' + '));
+    const fx = {};
+    for (const w of [1, 2, 3, 4, 5, 6, 0]) if (r.fixed[w]) (fx[r.fixed[w]] = fx[r.fixed[w]] || []).push(WEEKDAYS[w]);
+    for (const [c, days] of Object.entries(fx)) out.push('selalu ' + name(c) + ' tiap ' + days.join(', '));
+    if (r.backup) out.push('prioritas ' + name(r.backup) + ' bila ada yang libur');
     if (r.maxOff) out.push('libur maks. ' + r.maxOff + ' hari/bulan');
     if (r.offDays.length) out.push('libur tiap ' + r.offDays.map((w) => WEEKDAYS[w]).join(', '));
     if (r.maxWeek) out.push('masuk maks. ' + r.maxWeek + ' hari/minggu');
@@ -204,11 +214,13 @@
   }
 
   /**
-   * Buat jadwal otomatis, dalam empat tahap:
+   * Buat jadwal otomatis, dalam beberapa tahap:
+   *  0. shift tetap per hari (mis. selalu Pagi setiap Senin) diisi lebih dulu,
    *  1. setiap hari diisi sampai jumlah MINIMAL per shift (agar tidak ada hari yang kosong),
    *  2. lalu ditambah sampai kebutuhan IDEAL bila masih ada yang boleh masuk,
    *  3. pembagian shift per minggu (mis. 3 Pagi + 3 Siang) dilengkapi,
-   *  4. karyawan dengan batas libur per bulan dijadwalkan masuk sampai liburnya tidak melebihi batas.
+   *  4. karyawan dengan batas libur per bulan dijadwalkan masuk sampai liburnya tidak melebihi batas,
+   *  5. pada hari ada yang libur, karyawan bertanda "prioritas" dipindah ke shift prioritasnya.
    * Urutan calon: yang masih kurang hari masuk (batas libur) → kekurangan pembagian shift minggu itu
    * → paling sedikit masuk (mode Merata) → acak. Semua ketentuan karyawan tetap dipatuhi.
    * @param opt { seed, mode: 'fair' | 'random', keepManual (bawaan true) }
@@ -232,10 +244,29 @@
     const day = {};
     for (let d = 1; d <= N; d++) day[d] = needOf(s, d);
     const tie = new Map(emps.map((e) => [e, rnd()]));
+    const isManual = (e, d) => keep && !!((s.config.manual || {})[e] || {})[d];
+    const unable = (e, d) => {
+      const r = rules.get(e);
+      return day[d].closed || r.offDays.includes(weekday(s.period, d)) || r.unavailable.includes(d);
+    };
+    // hari yang sudah pasti ada karyawan libur (libur tetap, tidak bisa, isian manual "L")
+    const someoneOff = (d) => !day[d].closed && emps.some((e) => asg[e][d] === OFF || (!asg[e][d] && unable(e, d)));
+    // 0. shift tetap per hari (mis. selalu Pagi setiap Senin)
+    for (const e of emps) {
+      const r = rules.get(e);
+      if (!Object.keys(r.fixed).length) continue;
+      for (let d = 1; d <= N; d++) {
+        const c = r.fixed[weekday(s.period, d)];
+        if (c && !asg[e][d] && !day[d].closed && allowed(s, r, asg[e], d, c)) asg[e][d] = c;
+      }
+    }
     const count = (d, c) => emps.filter((e) => asg[e][d] === c).length;
     const works = (e) => Object.values(asg[e]).filter(isWork).length;
     const shiftN = (e, c) => Object.values(asg[e]).filter((v) => v === c).length;
-    const can = (e, d, c) => !asg[e][d] && !day[d].closed && allowed(s, rules.get(e), asg[e], d, c);
+    const can = (e, d, c) => {
+      const fx = rules.get(e).fixed[weekday(s.period, d)];
+      return !asg[e][d] && !day[d].closed && (!fx || fx === c) && allowed(s, rules.get(e), asg[e], d, c);
+    };
     const quotaLeft = (e, d, c) => {
       const q = quotaFor(s, rules.get(e), d).q;
       if (!(c in q)) return 0;
@@ -249,7 +280,8 @@
     };
     const fair = opt.mode !== 'random';
     const pick = (d, c, list) => {
-      const key = (e) => [-Math.max(0, needWork(e)), -Math.max(0, quotaLeft(e, d, c)), fair ? works(e) : 0, fair ? shiftN(e, c) : 0, tie.get(e) + (fair ? 0 : rnd())];
+      const off = someoneOff(d);
+      const key = (e) => [off && rules.get(e).backup === c ? 0 : 1, -Math.max(0, needWork(e)), -Math.max(0, quotaLeft(e, d, c)), fair ? works(e) : 0, fair ? shiftN(e, c) : 0, tie.get(e) + (fair ? 0 : rnd())];
       const k = new Map(list.map((e) => [e, key(e)]));
       return list.sort((a, b) => {
         const ka = k.get(a);
@@ -314,9 +346,29 @@
         asg[e][best.d] = best.c;
       }
     }
+    for (let d = 1; d <= N; d++) for (const e of emps) if (!asg[e][d]) asg[e][d] = OFF;
+    // 5. prioritas bila ada yang libur: karyawan bertanda masuk shift prioritasnya (tukar dengan rekan
+    //    yang tidak bertanda, atau masuk dari libur bila shift itu masih di bawah ideal)
+    const fixedAt = (e, d) => !!rules.get(e).fixed[weekday(s.period, d)];
+    for (let d = 1; d <= N; d++) {
+      if (day[d].closed || !emps.some((e) => asg[e][d] === OFF)) continue;
+      for (const e of emps) {
+        const c = rules.get(e).backup;
+        const v = asg[e][d];
+        if (!c || v === c || isManual(e, d) || fixedAt(e, d)) continue;
+        if (v === OFF) {
+          if (!unable(e, d) && count(d, c) < day[d].need[c] && allowed(s, rules.get(e), asg[e], d, c)) asg[e][d] = c;
+          continue;
+        }
+        const f = emps.find((x) => x !== e && asg[x][d] === c && rules.get(x).backup !== c && !isManual(x, d) && !fixedAt(x, d) && allowed(s, rules.get(x), asg[x], d, v) && allowed(s, rules.get(e), asg[e], d, c));
+        if (f) {
+          asg[f][d] = v;
+          asg[e][d] = c;
+        }
+      }
+    }
     const warnings = [];
     for (let d = 1; d <= N; d++) {
-      for (const e of emps) if (!asg[e][d]) asg[e][d] = OFF;
       if (day[d].closed) continue;
       for (const sh of s.config.shifts) {
         const have = count(d, sh.code);
@@ -381,6 +433,8 @@
         x.perShift[v] = (x.perShift[v] || 0) + 1;
         run++;
         if (Array.isArray(r.shifts) && !r.shifts.includes(v)) note(d, 'shift ' + v + ' tidak diizinkan');
+        const fx = r.fixed[weekday(s.period, d)];
+        if (fx && fx !== v) note(d, 'seharusnya selalu ' + ((shiftOf(s, fx) || {}).name || fx) + ' setiap ' + WEEKDAYS[weekday(s.period, d)]);
         if (r.offDays.includes(weekday(s.period, d))) note(d, 'masuk pada hari libur tetap (' + WEEKDAYS[weekday(s.period, d)] + ')');
         if (r.unavailable.includes(d)) note(d, 'masuk pada tanggal tidak tersedia');
         if (r.maxRun && run === r.maxRun + 1) note(d, 'lebih dari ' + r.maxRun + ' hari berturut-turut');
@@ -490,6 +544,64 @@
       });
     },
 
+    /** PDF A4 landscape: tabel jadwal berwarna per shift, jumlah petugas per hari, keterangan shift. */
+    async pdf(s, empMap) {
+      const N = daysIn(s.period);
+      const C = check(s);
+      const rgb = (hex) => [1, 3, 5].map((i) => parseInt(String(hex || '#6b7280').slice(i, i + 2), 16) || 0);
+      const tint = (hex, k) => rgb(hex).map((v) => Math.round(v + (255 - v) * k));
+      const dayHead = [];
+      for (let d = 1; d <= N; d++) dayHead.push(d + '\n' + WD3[weekday(s.period, d)]);
+      const sundayCol = (i) => i >= 1 && i <= N && weekday(s.period, i) === 0;
+      const colorCells = (data) => {
+        const i = data.column.index;
+        if (data.section === 'head' && sundayCol(i)) data.cell.styles.textColor = [254, 202, 202];
+        if (data.section !== 'body' || i < 1 || i > N) return;
+        const v = data.cell.raw;
+        const sh = shiftOf(s, v);
+        if (sh) {
+          data.cell.styles.fillColor = tint(sh.color, 0.78);
+          data.cell.styles.textColor = rgb(sh.color).map((x) => Math.round(x * 0.6));
+          data.cell.styles.fontStyle = 'bold';
+        } else if (v === OFF) data.cell.styles.textColor = [148, 163, 184];
+        else if (typeof v === 'string' && v.includes('/') && data.row.raw && data.row.raw.short && data.row.raw.short[i]) data.cell.styles.textColor = [220, 38, 38];
+      };
+      const base = { styles: { fontSize: 6.4, cellPadding: 0.7, halign: 'center', valign: 'middle', lineColor: [203, 213, 225], lineWidth: 0.1, overflow: 'linebreak' }, headStyles: { fillColor: [0, 107, 42], textColor: 255, fontStyle: 'bold', fontSize: 6.2, halign: 'center' }, alternateRowStyles: {}, columnStyles: { 0: { halign: 'left', cellWidth: 36, fontSize: 6.8 } }, margin: { left: 8, right: 8 }, didParseCell: colorCells };
+      const body = s.config.employees.map((e) => {
+        const emp = empMap.get(e) || { name: e, position: '' };
+        const row = [emp.name + (emp.position ? '\n' + emp.position : '')];
+        for (let d = 1; d <= N; d++) row.push(((s.assignments[e] || {})[d]) || '');
+        row.push(C.byEmp[e].work, C.byEmp[e].off);
+        return row;
+      });
+      const counts = s.config.shifts.map((sh) => {
+        const row = [sh.code + ' · ' + sh.name];
+        const short = {};
+        for (let d = 1; d <= N; d++) {
+          const b = C.byDay[d];
+          row.push(b.closed ? '–' : (b.count[sh.code] || 0) + '/' + b.need[sh.code]);
+          if (!b.closed && b.short[sh.code]) short[d] = true;
+        }
+        row.push('', '');
+        row.short = short;
+        return row;
+      });
+      const set = (NP.state && NP.state.settings) || {};
+      return NP.exp.pdfTable({
+        orientation: 'landscape',
+        unit: s.unit === 'APT' ? 'APT' : 'KLINIK',
+        headerName: s.unit === 'ALL' ? (set.company && set.company.name) || undefined : undefined,
+        title: 'JADWAL MASUK — ' + u.periodLabel(s.period).toUpperCase(),
+        subtitle: UNITS[s.unit] + ' · ' + s.config.employees.length + ' karyawan' + (s.version ? ' · versi ' + s.version : '') + (s.dirty ? ' · BELUM DISIMPAN' : ''),
+        sections: [
+          { head: ['Karyawan'].concat(dayHead, ['Masuk', 'Libur']), body, tableOpts: base },
+          { title: 'Jumlah petugas per hari (terisi/ideal)', head: ['Shift'].concat(dayHead, ['', '']), body: counts, tableOpts: base },
+          { title: 'Keterangan', head: ['Kode', 'Nama shift', 'Jam', 'Lama (jam)', 'Ideal / minimal'], body: s.config.shifts.map((sh) => [sh.code, sh.name, sh.start + '–' + sh.end, hours(sh), sh.min === undefined || sh.min === null ? 'sesuai kebutuhan' : 'minimal ' + sh.min + ' bila ada yang libur']).concat([[OFF, 'Libur', '', '', '']]), tableOpts: { styles: { fontSize: 7.5, cellPadding: 1.2 }, tableWidth: 160, margin: { left: 8 } } }
+        ],
+        filename: 'jadwal-masuk-' + s.period + '-' + s.unit.toLowerCase() + '.pdf'
+      });
+    },
+
     /** Tabel Excel: baris karyawan, kolom tanggal. */
     toSheets(s, empMap) {
       const N = daysIn(s.period);
@@ -554,6 +666,7 @@
       <div class="page-head">
         <div><h2>Jadwal Masuk</h2><p class="muted">Susun jadwal kerja bulanan: atur shift dan kebutuhan petugas per hari, pilih karyawan beserta ketentuannya, lalu buat jadwal otomatis (merata atau acak) dan sesuaikan per sel.</p></div>
         <div class="actions">
+          <button type="button" class="btn btn-ghost" data-act="pdf">${ui.icon('pdf')}<span>PDF</span></button>
           <button type="button" class="btn btn-ghost" data-act="xls">${ui.icon('excel')}<span>Excel</span></button>
           <button type="button" class="btn btn-ghost" data-act="print">${ui.icon('print')}<span>Cetak</span></button>
         </div>
@@ -711,6 +824,8 @@
               <div class="sch-line"><span class="sch-lbl">Boleh masuk shift</span><div class="sch-val chips">${s.config.shifts.map((sh) => `<label class="chip-check"><input type="checkbox" data-rs="${u.esc(sh.code)}" ${!Array.isArray(r.shifts) || r.shifts.includes(sh.code) ? 'checked' : ''} ${dis}><span title="${u.esc(sh.name)}">${u.esc(sh.name)}</span></label>`).join('')}</div></div>
               <div class="sch-line"><span class="sch-lbl">Selalu libur setiap</span><div class="sch-val chips">${[1, 2, 3, 4, 5, 6, 0].map((w) => `<label class="chip-check off"><input type="checkbox" data-ro="${w}" ${r.offDays.includes(w) ? 'checked' : ''} ${dis}><span title="${WEEKDAYS[w]}">${WD3[w]}</span></label>`).join('')}</div></div>
               <div class="sch-line"><span class="sch-lbl">Pembagian per minggu</span><div class="sch-val sch-q">${s.config.shifts.map((sh) => `<label><input type="number" min="0" max="7" data-rq="${u.esc(sh.code)}" value="${sh.code in r.quota ? r.quota[sh.code] : ''}" placeholder="–" ${dis} aria-label="Jumlah ${u.esc(sh.name)} per minggu"><span>× ${u.esc(sh.name)}</span></label>`).join('<span class="muted">+</span>')}<small class="muted">kosong = bebas</small></div></div>
+              <div class="sch-line"><span class="sch-lbl">Selalu shift tertentu pada hari</span><div class="sch-val sch-fixed">${[1, 2, 3, 4, 5, 6, 0].map((w) => `<label class="${r.fixed[w] ? 'on' : ''}"><small>${WD3[w]}</small><select data-rf="${w}" ${dis} aria-label="Shift tetap setiap ${WEEKDAYS[w]}" title="${r.fixed[w] ? u.esc((shiftOf(s, r.fixed[w]) || {}).name || '') : 'bebas'}"><option value="">–</option>${s.config.shifts.map((sh) => `<option value="${u.esc(sh.code)}" ${r.fixed[w] === sh.code ? 'selected' : ''}>${u.esc(sh.code)}</option>`).join('')}</select></label>`).join('')}<small class="muted sch-fixed-note">– = bebas · ${s.config.shifts.map((sh) => u.esc(sh.code) + ' = ' + u.esc(sh.name)).join(' · ')}</small></div></div>
+              <div class="sch-line"><span class="sch-lbl">Bila ada karyawan lain libur</span><div class="sch-val"><select data-rb ${dis} aria-label="Prioritas bila ada yang libur"><option value="">tidak ada prioritas</option>${s.config.shifts.map((sh) => `<option value="${u.esc(sh.code)}" ${r.backup === sh.code ? 'selected' : ''}>prioritas masuk ${u.esc(sh.name)}</option>`).join('')}</select></div></div>
             </div>
             <div class="sch-rg">
               <label class="sch-line"><span class="sch-lbl">Libur paling banyak</span><span class="sch-val">${num('maxOff', r.maxOff, 31, 'Libur paling banyak per bulan')}<span>hari dalam sebulan</span></span></label>
@@ -735,6 +850,8 @@
               <li><b>Libur maksimal 2 hari per bulan</b> → isi <i>Libur paling banyak</i> = 2, lalu kosongkan <i>Masuk paling banyak … per minggu</i> dan <i>Masuk berturut-turut</i> (batas itu memaksa libur lebih sering).</li>
               <li><b>Per minggu 3 kali Pagi dan 3 kali Siang</b> → isi <i>Pembagian per minggu</i>: 3 × Pagi + 3 × Siang (otomatis 1 hari libur per minggu).</li>
               <li><b>Selalu libur hari Minggu</b> → pilih <i>Min</i> pada <i>Selalu libur setiap</i>.</li>
+              <li><b>Selalu Pagi setiap Senin</b> (atau Siang/Malam hari tertentu) → pada <i>Selalu shift tertentu pada hari</i>, pilih Pagi di kolom <i>Sen</i>.</li>
+              <li><b>Bila ada yang libur, karyawan ini diutamakan masuk Pagi</b> → pilih <i>prioritas masuk Pagi</i> pada <i>Bila ada karyawan lain libur</i>.</li>
               <li><b>Cuti tanggal 10 sampai 12</b> → isi <i>Tidak bisa masuk tanggal</i> = 10-12.</li>
               <li><b>Siang cukup 1 orang bila ada yang libur</b> → di tab <i>Shift &amp; kebutuhan per hari</i>, isi kolom <i>Minimal bila ada yang libur</i> untuk Siang = 1.</li>
             </ul>
@@ -793,6 +910,39 @@
     }
 
     /* ------------------------------ Interaksi ------------------------------ */
+    /** Gambar ulang tab tanpa melompat ke atas: posisi gulir halaman & tabel serta kolom yang
+     *  sedang diisi (mis. setelah Tab ke kolom berikutnya) dipertahankan. */
+    const focusKey = (el) => {
+      if (!el || !body.contains(el) || el === body) return null;
+      const box = el.closest('[data-emp],[data-si],[data-day]');
+      const attr = ['data-rn', 'data-rq', 'data-rf', 'data-rb', 'data-ru', 'data-rs', 'data-ro', 'data-inc', 'data-sf', 'data-dn', 'data-dc', 'data-wn', 'data-e'].find((x) => el.hasAttribute(x));
+      if (!attr) return null;
+      const esc = (v) => (root.CSS && CSS.escape ? CSS.escape(v) : String(v).replace(/["\\]/g, '\\$&'));
+      const own = '[' + attr + '="' + esc(el.getAttribute(attr)) + '"]' + (attr === 'data-e' ? '[data-d="' + el.dataset.d + '"]' : '');
+      if (!box) return own;
+      const k = ['data-emp', 'data-si', 'data-day'].find((x) => box.hasAttribute(x));
+      return '[' + k + '="' + esc(box.getAttribute(k)) + '"] ' + own;
+    };
+    let pending = null;
+    function rerender(fn) {
+      pending = fn;
+      setTimeout(() => {
+        if (pending !== fn) return;
+        pending = null;
+        const y = window.scrollY;
+        const wrap = body.querySelector('.sch-wrap');
+        const sx = wrap ? wrap.scrollLeft : 0;
+        const key = focusKey(document.activeElement);
+        fn();
+        const w2 = body.querySelector('.sch-wrap');
+        if (w2) w2.scrollLeft = sx;
+        if (key) {
+          const el = body.querySelector(key);
+          if (el) el.focus({ preventScroll: true });
+        }
+        window.scrollTo(0, y);
+      }, 0);
+    }
     const setRule = (e, patch) => {
       s.config.rules[e] = Object.assign({}, s.config.rules[e] || {}, patch);
       markDirty();
@@ -813,11 +963,7 @@
           s.config.manual[e][d] = true;
         }
         markDirty();
-        const y = body.querySelector('.sch-wrap');
-        const sx = y ? y.scrollLeft : 0;
-        drawGrid();
-        const y2 = body.querySelector('.sch-wrap');
-        if (y2) y2.scrollLeft = sx;
+        rerender(drawGrid);
         return;
       }
       const br = ev.target.closest('[data-brush]');
@@ -835,7 +981,7 @@
           s.assignments = {};
           s.config.manual = {};
           markDirty();
-          drawGrid();
+          rerender(drawGrid);
         });
         return;
       }
@@ -843,7 +989,7 @@
       if (all) {
         s.config.employees = all.dataset.act === 'all-in' ? [...new Set(s.config.employees.concat(pool.map((e) => e.id)))] : [];
         markDirty();
-        drawPeople();
+        rerender(drawPeople);
         return;
       }
       if (ev.target.closest('[data-act="add-shift"]')) {
@@ -851,7 +997,7 @@
         const code = ['M', 'PS', 'SM', 'X', 'Y', 'Z'].find((c) => !used.has(c)) || 'S' + s.config.shifts.length;
         s.config.shifts.push({ code, name: code === 'M' ? 'Malam' : 'Shift ' + code, start: '21:00', end: '07:00', color: PALETTE[s.config.shifts.length % PALETTE.length] });
         markDirty();
-        drawNeeds();
+        rerender(drawNeeds);
         return;
       }
       const cp = ev.target.closest('[data-copyrule]');
@@ -865,7 +1011,7 @@
           delete base.unavailable;
           for (const e of others) s.config.rules[e] = Object.assign(clone(base), { unavailable: ((s.config.rules[e] || {}).unavailable || []).slice() });
           markDirty();
-          drawPeople();
+          rerender(drawPeople);
           ui.toast('Ketentuan disalin ke ' + others.length + ' karyawan.');
         });
         return;
@@ -882,7 +1028,7 @@
             if (s.config.manual[e]) delete s.config.manual[e][d];
           }
           markDirty();
-          drawNeeds();
+          rerender(drawNeeds);
         });
         return;
       }
@@ -890,7 +1036,7 @@
       if (rs) {
         delete s.config.days[rs.closest('tr').dataset.day];
         markDirty();
-        drawNeeds();
+        rerender(drawNeeds);
       }
     });
     body.addEventListener('change', (ev) => {
@@ -901,34 +1047,45 @@
         const id = t.dataset.inc;
         s.config.employees = t.checked ? s.config.employees.concat(id) : s.config.employees.filter((x) => x !== id);
         markDirty();
-        return drawPeople();
+        return rerender(drawPeople);
       }
       const emp = tr && tr.dataset.emp;
       if (emp && t.dataset.rs) {
         const on = [...tr.querySelectorAll('[data-rs]')].filter((x) => x.checked).map((x) => x.dataset.rs);
         setRule(emp, { shifts: on.length === s.config.shifts.length ? null : on });
         if (!on.length) ui.toast('Karyawan tanpa shift yang boleh tidak akan dijadwalkan otomatis.', 'warning');
-        return drawPeople();
+        return rerender(drawPeople);
       }
       if (emp && t.dataset.ro !== undefined) {
         setRule(emp, { offDays: [...tr.querySelectorAll('[data-ro]')].filter((x) => x.checked).map((x) => +x.dataset.ro) });
-        return drawPeople();
+        return rerender(drawPeople);
       }
       if (emp && t.dataset.rn) {
         setRule(emp, { [t.dataset.rn]: Math.max(0, u.toInt(t.value) || 0) });
-        return drawPeople();
+        return rerender(drawPeople);
+      }
+      if (emp && t.dataset.rf !== undefined) {
+        const fx = Object.assign({}, ruleOf(s, emp).fixed);
+        if (t.value) fx[t.dataset.rf] = t.value;
+        else delete fx[t.dataset.rf];
+        setRule(emp, { fixed: fx });
+        return rerender(drawPeople);
+      }
+      if (emp && t.dataset.rb !== undefined) {
+        setRule(emp, { backup: t.value });
+        return rerender(drawPeople);
       }
       if (emp && t.dataset.rq) {
         const q = Object.assign({}, ruleOf(s, emp).quota);
         if (t.value === '') delete q[t.dataset.rq];
         else q[t.dataset.rq] = Math.max(0, Math.min(7, u.toInt(t.value) || 0));
         setRule(emp, { quota: q });
-        return drawPeople();
+        return rerender(drawPeople);
       }
       if (emp && t.dataset.ru !== undefined) {
         const list = parseDays(t.value, N);
         setRule(emp, { unavailable: list });
-        return drawPeople();
+        return rerender(drawPeople);
       }
       if (t.dataset.sf) {
         const i = +tr.dataset.si;
@@ -938,7 +1095,7 @@
           if (v === '') delete sh.min;
           else sh.min = Math.max(0, u.toInt(v) || 0);
           markDirty();
-          return drawNeeds();
+          return rerender(drawNeeds);
         }
         if (t.dataset.sf === 'code') {
           v = v.toUpperCase().replace(/[^A-Z0-9]/g, '').slice(0, 3);
@@ -958,18 +1115,26 @@
             o.need[v] = o.need[old];
             delete o.need[old];
           }
-          for (const r of Object.values(s.config.rules)) if (Array.isArray(r.shifts)) r.shifts = r.shifts.map((c) => (c === old ? v : c));
+          for (const r of Object.values(s.config.rules)) {
+            if (Array.isArray(r.shifts)) r.shifts = r.shifts.map((c) => (c === old ? v : c));
+            if (r.quota && old in r.quota) {
+              r.quota[v] = r.quota[old];
+              delete r.quota[old];
+            }
+            for (const w of Object.keys(r.fixed || {})) if (r.fixed[w] === old) r.fixed[w] = v;
+            if (r.backup === old) r.backup = v;
+          }
           if (st.brush === old) st.brush = v;
         }
         sh[t.dataset.sf] = v;
         markDirty();
-        return drawNeeds();
+        return rerender(drawNeeds);
       }
       if (t.dataset.wn) {
         const [w, c] = t.dataset.wn.split('|');
         s.config.weekly[w] = Object.assign({}, s.config.weekly[w] || {}, { [c]: Math.max(0, u.toInt(t.value) || 0) });
         markDirty();
-        return drawNeeds();
+        return rerender(drawNeeds);
       }
       if (t.dataset.dn !== undefined || t.dataset.dc !== undefined) {
         const d = tr.dataset.day;
@@ -982,7 +1147,7 @@
         if (!o.closed && !Object.keys(o.need).length) delete s.config.days[d];
         else s.config.days[d] = o;
         markDirty();
-        return drawNeeds();
+        return rerender(drawNeeds);
       }
       if (t.id === 'sc-mode') st.mode = t.value;
       if (t.id === 'sc-keep') st.keepManual = t.checked;
@@ -1005,6 +1170,10 @@
       if (a.dataset.act === 'xls') {
         if (!s.config.employees.length) return ui.toast('Jadwal masih kosong.', 'error');
         NP.exp.excel(sched.toSheets(s, empMap), 'jadwal-masuk-' + s.period + '-' + s.unit.toLowerCase() + '.xlsx');
+      }
+      if (a.dataset.act === 'pdf') {
+        if (!s.config.employees.length) return ui.toast('Jadwal masih kosong.', 'error');
+        ui.busy('Membuat PDF jadwal…', () => sched.pdf(s, empMap)).catch((e) => ui.toast(e.message, 'error'));
       }
       if (a.dataset.act === 'print') {
         if (!s.config.employees.length) return ui.toast('Jadwal masih kosong.', 'error');
