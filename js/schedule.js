@@ -25,7 +25,9 @@
     { code: 'S', name: 'Siang', start: '14:00', end: '21:00', color: '#d97706' }
   ];
   // maxOff: libur maks. per bulan · quota: pembagian shift per minggu, mis. { P: 3, S: 3 }
-  const DEFAULT_RULE = { shifts: null, offDays: [], maxWeek: 6, maxRun: 6, maxMonth: 0, maxOff: 0, quota: {}, unavailable: [] };
+  // fixed: shift tetap per hari, mis. { 1: 'P' } = selalu Pagi setiap Senin
+  // backup: kode shift yang diprioritaskan untuk karyawan ini bila ada karyawan lain yang libur
+  const DEFAULT_RULE = { shifts: null, offDays: [], maxWeek: 6, maxRun: 6, maxMonth: 0, maxOff: 0, quota: {}, fixed: {}, backup: '', unavailable: [] };
 
   const clone = (o) => JSON.parse(JSON.stringify(o));
   const daysIn = (period) => new Date(+period.slice(0, 4), +period.slice(5, 7), 0).getDate();
@@ -106,6 +108,10 @@
     const q = {};
     for (const [c, v] of Object.entries(r.quota || {})) if (codes(s).includes(c) && v !== '' && v !== null && v !== undefined && u.toInt(v) >= 0) q[c] = u.toInt(v);
     r.quota = q;
+    const fx = {};
+    for (const [w, c] of Object.entries(r.fixed || {})) if (+w >= 0 && +w <= 6 && codes(s).includes(c)) fx[+w] = c;
+    r.fixed = fx;
+    r.backup = codes(s).includes(r.backup) ? r.backup : '';
     if (Array.isArray(r.shifts)) r.shifts = r.shifts.filter((c) => codes(s).includes(c));
     return r;
   }
@@ -117,6 +123,10 @@
     if (Array.isArray(r.shifts)) out.push(r.shifts.length ? 'hanya shift ' + r.shifts.map(name).join(' & ') : 'tidak dijadwalkan otomatis (tanpa shift)');
     const q = Object.entries(r.quota || {});
     if (q.length) out.push('per minggu ' + q.map(([c, n]) => n + '× ' + name(c)).join(' + '));
+    const fx = {};
+    for (const w of [1, 2, 3, 4, 5, 6, 0]) if (r.fixed[w]) (fx[r.fixed[w]] = fx[r.fixed[w]] || []).push(WEEKDAYS[w]);
+    for (const [c, days] of Object.entries(fx)) out.push('selalu ' + name(c) + ' tiap ' + days.join(', '));
+    if (r.backup) out.push('prioritas ' + name(r.backup) + ' bila ada yang libur');
     if (r.maxOff) out.push('libur maks. ' + r.maxOff + ' hari/bulan');
     if (r.offDays.length) out.push('libur tiap ' + r.offDays.map((w) => WEEKDAYS[w]).join(', '));
     if (r.maxWeek) out.push('masuk maks. ' + r.maxWeek + ' hari/minggu');
@@ -144,6 +154,15 @@
 
   // Senin sebagai awal minggu
   const weekStart = (period, d) => d - ((weekday(period, d) + 6) % 7);
+  /** Minggu dalam bulan (Senin–Minggu, terpotong di awal/akhir bulan): [{ no, from, to }] */
+  function weeksOf(period) {
+    const N = daysIn(period);
+    const out = [];
+    for (let ws = weekStart(period, 1); ws <= N; ws += 7) out.push({ no: out.length + 1, from: Math.max(1, ws), to: Math.min(N, ws + 6) });
+    return out;
+  }
+  /** Tanggal d adalah awal minggu (Senin) selain tanggal 1 → diberi garis batas minggu. */
+  const weekEdge = (period, d) => d > 1 && weekday(period, d) === 1;
   /** Target pembagian shift untuk minggu yang memuat tanggal d (minggu terpotong awal/akhir bulan dihitung proporsional). */
   function quotaFor(s, r, d) {
     const a = Math.max(1, weekStart(s.period, d));
@@ -204,14 +223,18 @@
   }
 
   /**
-   * Buat jadwal otomatis, dalam empat tahap:
+   * Buat jadwal otomatis, dalam beberapa tahap:
+   *  0. shift tetap per hari (mis. selalu Pagi setiap Senin) diisi lebih dulu,
    *  1. setiap hari diisi sampai jumlah MINIMAL per shift (agar tidak ada hari yang kosong),
    *  2. lalu ditambah sampai kebutuhan IDEAL bila masih ada yang boleh masuk,
    *  3. pembagian shift per minggu (mis. 3 Pagi + 3 Siang) dilengkapi,
-   *  4. karyawan dengan batas libur per bulan dijadwalkan masuk sampai liburnya tidak melebihi batas.
+   *  4. karyawan dengan batas libur per bulan dijadwalkan masuk sampai liburnya tidak melebihi batas,
+   *  5. pada hari ada yang libur, karyawan bertanda "prioritas" dipindah ke shift prioritasnya.
    * Urutan calon: yang masih kurang hari masuk (batas libur) → kekurangan pembagian shift minggu itu
    * → paling sedikit masuk (mode Merata) → acak. Semua ketentuan karyawan tetap dipatuhi.
-   * @param opt { seed, mode: 'fair' | 'random', keepManual (bawaan true) }
+   * @param opt { seed, mode: 'fair' | 'random', keepManual (bawaan true),
+   *              manualOffWeek (bawaan true): minggu yang sudah berisi libur manual ("L") tidak diberi
+   *              libur acak lagi — karyawan dijadwalkan masuk pada hari lain di minggu itu }
    * @returns { assignments, warnings: [{ day, code, missing }] }  — missing = kurang dari MINIMAL
    */
   function generate(s, opt) {
@@ -232,10 +255,34 @@
     const day = {};
     for (let d = 1; d <= N; d++) day[d] = needOf(s, d);
     const tie = new Map(emps.map((e) => [e, rnd()]));
+    const isManual = (e, d) => keep && !!((s.config.manual || {})[e] || {})[d];
+    const unable = (e, d) => {
+      const r = rules.get(e);
+      return day[d].closed || r.offDays.includes(weekday(s.period, d)) || r.unavailable.includes(d);
+    };
+    // minggu (Senin–Minggu) yang sudah berisi libur manual karyawan → tanpa libur acak tambahan
+    const wkOf = (d) => weekStart(s.period, d);
+    const offWeek = new Map(emps.map((e) => [e, new Set()]));
+    if (keep && opt.manualOffWeek !== false) for (const e of emps) for (const d of Object.keys(asg[e])) if (asg[e][d] === OFF && isManual(e, d)) offWeek.get(e).add(wkOf(+d));
+    const inOffWeek = (e, d) => offWeek.get(e).has(wkOf(d));
+    // hari yang sudah pasti ada karyawan libur (libur tetap, tidak bisa, isian manual "L")
+    const someoneOff = (d) => !day[d].closed && emps.some((e) => asg[e][d] === OFF || (!asg[e][d] && unable(e, d)));
+    // 0. shift tetap per hari (mis. selalu Pagi setiap Senin)
+    for (const e of emps) {
+      const r = rules.get(e);
+      if (!Object.keys(r.fixed).length) continue;
+      for (let d = 1; d <= N; d++) {
+        const c = r.fixed[weekday(s.period, d)];
+        if (c && !asg[e][d] && !day[d].closed && allowed(s, r, asg[e], d, c)) asg[e][d] = c;
+      }
+    }
     const count = (d, c) => emps.filter((e) => asg[e][d] === c).length;
     const works = (e) => Object.values(asg[e]).filter(isWork).length;
     const shiftN = (e, c) => Object.values(asg[e]).filter((v) => v === c).length;
-    const can = (e, d, c) => !asg[e][d] && !day[d].closed && allowed(s, rules.get(e), asg[e], d, c);
+    const can = (e, d, c) => {
+      const fx = rules.get(e).fixed[weekday(s.period, d)];
+      return !asg[e][d] && !day[d].closed && (!fx || fx === c) && allowed(s, rules.get(e), asg[e], d, c);
+    };
     const quotaLeft = (e, d, c) => {
       const q = quotaFor(s, rules.get(e), d).q;
       if (!(c in q)) return 0;
@@ -249,7 +296,8 @@
     };
     const fair = opt.mode !== 'random';
     const pick = (d, c, list) => {
-      const key = (e) => [-Math.max(0, needWork(e)), -Math.max(0, quotaLeft(e, d, c)), fair ? works(e) : 0, fair ? shiftN(e, c) : 0, tie.get(e) + (fair ? 0 : rnd())];
+      const off = someoneOff(d);
+      const key = (e) => [off && rules.get(e).backup === c ? 0 : 1, inOffWeek(e, d) ? 0 : 1, -Math.max(0, needWork(e)), -Math.max(0, quotaLeft(e, d, c)), fair ? works(e) : 0, fair ? shiftN(e, c) : 0, tie.get(e) + (fair ? 0 : rnd())];
       const k = new Map(list.map((e) => [e, key(e)]));
       return list.sort((a, b) => {
         const ka = k.get(a);
@@ -314,9 +362,39 @@
         asg[e][best.d] = best.c;
       }
     }
+    // 4b. minggu dengan libur manual: hari lain di minggu itu tetap masuk (shift yang paling dibutuhkan)
+    for (const e of emps) {
+      for (let d = 1; d <= N; d++) {
+        if (asg[e][d] || !inOffWeek(e, d) || unable(e, d)) continue;
+        const opts = s.config.shifts.filter((sh) => can(e, d, sh.code));
+        if (!opts.length) continue;
+        opts.sort((a, b) => Math.max(0, quotaLeft(e, d, b.code)) - Math.max(0, quotaLeft(e, d, a.code)) || count(d, a.code) / Math.max(1, day[d].need[a.code]) - count(d, b.code) / Math.max(1, day[d].need[b.code]) || dt[d] - 0.5);
+        asg[e][d] = opts[0].code;
+      }
+    }
+    for (let d = 1; d <= N; d++) for (const e of emps) if (!asg[e][d]) asg[e][d] = OFF;
+    // 5. prioritas bila ada yang libur: karyawan bertanda masuk shift prioritasnya (tukar dengan rekan
+    //    yang tidak bertanda, atau masuk dari libur bila shift itu masih di bawah ideal)
+    const fixedAt = (e, d) => !!rules.get(e).fixed[weekday(s.period, d)];
+    for (let d = 1; d <= N; d++) {
+      if (day[d].closed || !emps.some((e) => asg[e][d] === OFF)) continue;
+      for (const e of emps) {
+        const c = rules.get(e).backup;
+        const v = asg[e][d];
+        if (!c || v === c || isManual(e, d) || fixedAt(e, d)) continue;
+        if (v === OFF) {
+          if (!unable(e, d) && count(d, c) < day[d].need[c] && allowed(s, rules.get(e), asg[e], d, c)) asg[e][d] = c;
+          continue;
+        }
+        const f = emps.find((x) => x !== e && asg[x][d] === c && rules.get(x).backup !== c && !isManual(x, d) && !fixedAt(x, d) && allowed(s, rules.get(x), asg[x], d, v) && allowed(s, rules.get(e), asg[e], d, c));
+        if (f) {
+          asg[f][d] = v;
+          asg[e][d] = c;
+        }
+      }
+    }
     const warnings = [];
     for (let d = 1; d <= N; d++) {
-      for (const e of emps) if (!asg[e][d]) asg[e][d] = OFF;
       if (day[d].closed) continue;
       for (const sh of s.config.shifts) {
         const have = count(d, sh.code);
@@ -381,6 +459,8 @@
         x.perShift[v] = (x.perShift[v] || 0) + 1;
         run++;
         if (Array.isArray(r.shifts) && !r.shifts.includes(v)) note(d, 'shift ' + v + ' tidak diizinkan');
+        const fx = r.fixed[weekday(s.period, d)];
+        if (fx && fx !== v) note(d, 'seharusnya selalu ' + ((shiftOf(s, fx) || {}).name || fx) + ' setiap ' + WEEKDAYS[weekday(s.period, d)]);
         if (r.offDays.includes(weekday(s.period, d))) note(d, 'masuk pada hari libur tetap (' + WEEKDAYS[weekday(s.period, d)] + ')');
         if (r.unavailable.includes(d)) note(d, 'masuk pada tanggal tidak tersedia');
         if (r.maxRun && run === r.maxRun + 1) note(d, 'lebih dari ' + r.maxRun + ' hari berturut-turut');
@@ -448,10 +528,204 @@
     return { id: idOf(s.period, s.unit), period: s.period, unit: s.unit, title: s.title || '', config, assignments, version: s.version };
   }
 
+  /* ------------------------------ Impor Excel ------------------------------ */
+  const MONTHS = { jan: 1, feb: 2, mar: 3, apr: 4, mei: 5, may: 5, jun: 6, jul: 7, agu: 8, agt: 8, aug: 8, sep: 9, okt: 10, oct: 10, nov: 11, des: 12, dec: 12 };
+  const cellStr = (v) => (v === null || v === undefined ? '' : String(v).trim());
+  /** Jam dari Excel: "08:00", "8.00", atau pecahan hari (0.3333) → "HH:MM". */
+  function timeOf(v) {
+    if (typeof v === 'number' && v >= 0 && v < 1) {
+      const m = Math.round(v * 1440);
+      return String(Math.floor(m / 60) % 24).padStart(2, '0') + ':' + String(m % 60).padStart(2, '0');
+    }
+    const m = /^(\d{1,2})[:.](\d{2})/.exec(cellStr(v));
+    return m && +m[1] < 24 && +m[2] < 60 ? m[1].padStart(2, '0') + ':' + m[2] : '';
+  }
+  /** Periode dari nama sheet / judul: "Jadwal 2026-12", "Desember 2026", "12/2026". */
+  function periodOf(text) {
+    const t = cellStr(text).toLowerCase();
+    let m = /(20\d{2})[-/ ](0?[1-9]|1[0-2])\b/.exec(t);
+    if (m) return m[1] + '-' + m[2].padStart(2, '0');
+    m = /\b(0?[1-9]|1[0-2])[-/ ](20\d{2})/.exec(t);
+    if (m) return m[2] + '-' + m[1].padStart(2, '0');
+    m = /(jan|feb|mar|apr|mei|may|jun|jul|agu|agt|aug|sep|okt|oct|nov|des|dec)[a-z]*\.?\s+(20\d{2})/.exec(t);
+    if (m) return m[2] + '-' + String(MONTHS[m[1]]).padStart(2, '0');
+    return null;
+  }
+  /**
+   * Baca jadwal dari lembar kerja (format ekspor Excel aplikasi ini, atau tabel serupa):
+   * baris judul berisi kolom "Nama" lalu kolom tanggal ("1", "1 Sel", "01"), baris berikutnya
+   * nama karyawan + kode shift per tanggal. Sheet "Keterangan" (Kode, Nama shift, Mulai, Selesai)
+   * dipakai untuk jam shift. Baris "Jumlah …" dan kolom ringkasan diabaikan.
+   * @param sheets [{ name, aoa }]
+   * @returns { period, shifts:[{code,name,start,end}], rows:[{name, position, cells:{d:code}, unknown:[]}], codes:[], warnings:[] }
+   */
+  function parseSheets(sheets) {
+    const out = { period: null, shifts: [], rows: [], codes: [], needs: {}, warnings: [], sheet: null };
+    const legend = sheets.find((x) => /keterangan|shift|legend/i.test(x.name));
+    if (legend) {
+      const hi = legend.aoa.findIndex((r) => (r || []).some((c) => /^kode$/i.test(cellStr(c))));
+      if (hi >= 0) {
+        const h = legend.aoa[hi].map((c) => cellStr(c).toLowerCase());
+        const col = (re) => h.findIndex((c) => re.test(c));
+        const [ck, cn, cs, ce] = [col(/^kode/), col(/nama/), col(/mulai|masuk|start/), col(/selesai|pulang|end/)];
+        for (const r of legend.aoa.slice(hi + 1)) {
+          const code = cellStr((r || [])[ck]).toUpperCase();
+          if (!/^[A-Z0-9]{1,3}$/.test(code) || code === OFF) continue;
+          out.shifts.push({ code, name: cellStr(r[cn]) || code, start: timeOf(r[cs]), end: timeOf(r[ce]) });
+        }
+      }
+    }
+    for (const sh of sheets) {
+      if (sh === legend) continue;
+      const aoa = sh.aoa || [];
+      const hi = aoa.findIndex((r) => (r || []).some((c) => /^(nama|karyawan|nama karyawan)$/i.test(cellStr(c))));
+      if (hi < 0) continue;
+      const head = aoa[hi];
+      const nameCol = head.findIndex((c) => /^(nama|karyawan|nama karyawan)$/i.test(cellStr(c)));
+      const posCol = head.findIndex((c) => /^(jabatan|posisi)$/i.test(cellStr(c)));
+      const dayCols = [];
+      head.forEach((c, i) => {
+        if (i === nameCol || i === posCol) return;
+        const m = /^(\d{1,2})(?:\s*[a-z]{2,6}\.?)?$/i.exec(cellStr(typeof c === 'number' ? Math.round(c) : c));
+        if (m && +m[1] >= 1 && +m[1] <= 31) dayCols.push({ i, d: +m[1], wd: cellStr(c).replace(/^\d+\s*/, '').slice(0, 3).toLowerCase() });
+      });
+      if (dayCols.length < 7) continue;
+      out.sheet = sh.name;
+      out.period = periodOf(sh.name) || aoa.slice(0, hi).map((r) => periodOf((r || []).join(' '))).find(Boolean) || null;
+      out.dayCols = dayCols;
+      const seen = new Set();
+      for (const r of aoa.slice(hi + 1)) {
+        const name = cellStr((r || [])[nameCol]);
+        // baris "Jumlah P" berisi terisi/ideal per tanggal → kebutuhan ideal
+        const jm = /^jumlah\s+([A-Z0-9]{1,3})$/i.exec(name);
+        if (jm) {
+          const code = jm[1].toUpperCase();
+          for (const { i, d } of dayCols) {
+            const m = /^\s*\d+\s*\/\s*(\d+)\s*$/.exec(cellStr(r[i]));
+            if (m) (out.needs[code] = out.needs[code] || {})[d] = +m[1];
+          }
+          continue;
+        }
+        if (!name || /^(jumlah|total|keterangan|kode)\b/i.test(name)) continue;
+        const cells = {};
+        const unknown = [];
+        for (const { i, d } of dayCols) {
+          const v = cellStr(r[i]).toUpperCase();
+          if (!v || v === '-') continue;
+          if (!/^[A-Z0-9]{1,3}$/.test(v)) {
+            unknown.push(d + ': ' + v);
+            continue;
+          }
+          cells[d] = v;
+          if (v !== OFF) seen.add(v);
+        }
+        if (!Object.keys(cells).length && !unknown.length) continue;
+        out.rows.push({ name, position: posCol >= 0 ? cellStr(r[posCol]) : '', cells, unknown });
+      }
+      out.codes = [...seen];
+      break;
+    }
+    if (!out.rows.length) out.warnings.push('Tidak menemukan tabel jadwal (baris judul dengan kolom "Nama" dan kolom tanggal 1–31).');
+    return out;
+  }
+  function parseWorkbook(wb, X) {
+    return parseSheets(wb.SheetNames.map((n) => ({ name: n, aoa: X.utils.sheet_to_json(wb.Sheets[n], { header: 1, raw: true, defval: null }) })));
+  }
+
+  // gelar & sapaan diabaikan saat mencocokkan nama
+  const TITLES = new Set(['apt', 'dr', 'drg', 'bd', 'ns', 'ny', 'tn', 'sdr', 'bpk', 'ibu', 's', 'farm', 'pd', 'e', 'kep', 'keb', 'md', 'a', 'amd', 'm', 'kes', 'si', 'st', 'se', 'sh', 'ked', 'sp', 'mm', 'mh', 'mkes', 'skep', 'sfarm', 'spd', 'ak', 'kom', 'sos', 'gz', 'tr', 'ftr', 'apt.']);
+  const nameTokens = (n) => String(n || '').toLowerCase().replace(/['’`]/g, '').split(/[^a-z0-9]+/).filter((t) => t && !TITLES.has(t));
+  /** Cocokkan nama di file dengan karyawan: semua kata inti sama (abaikan gelar & tanda baca). */
+  function matchEmployee(name, employees) {
+    const a = nameTokens(name);
+    if (!a.length) return null;
+    let best = null;
+    for (const e of employees) {
+      const b = nameTokens(e.name);
+      if (!b.length) continue;
+      const inter = a.filter((t) => b.includes(t)).length;
+      const score = inter / Math.max(a.length, b.length);
+      if (inter && (!best || score > best.score)) best = { e, score };
+    }
+    return best && best.score >= 0.6 ? best.e : null;
+  }
+
+  /**
+   * Terapkan hasil impor ke jadwal s (diubah langsung).
+   * @param map  { [indeks baris]: id karyawan } — baris tanpa karyawan dilewati
+   * @param opt  { manual (bawaan true): tandai isian sebagai manual, updateTimes (bawaan true),
+   *               needs (bawaan true): pakai kebutuhan petugas dari baris "Jumlah …" di file }
+   * Karyawan yang baru masuk jadwal lewat impor tidak diberi batas bawaan (maks. 6 hari per minggu
+   * & berturut-turut) agar jadwal dari file tidak langsung ditandai melanggar.
+   */
+  function applyImport(s, parsed, map, opt) {
+    opt = opt || {};
+    const N = daysIn(s.period);
+    const res = { employees: 0, cells: 0, addedShifts: [], updatedShifts: [], needs: false };
+    for (const code of parsed.codes) {
+      const def = parsed.shifts.find((x) => x.code === code);
+      const cur = shiftOf(s, code);
+      if (!cur) {
+        s.config.shifts.push({ code, name: (def && def.name) || 'Shift ' + code, start: (def && def.start) || '08:00', end: (def && def.end) || '15:00', color: PALETTE[s.config.shifts.length % PALETTE.length] });
+        res.addedShifts.push(code);
+      } else if (def && opt.updateTimes !== false && def.start && def.end && (def.start !== cur.start || def.end !== cur.end || (def.name && def.name !== cur.name))) {
+        Object.assign(cur, { name: def.name || cur.name, start: def.start, end: def.end });
+        res.updatedShifts.push(code);
+      }
+    }
+    if (opt.needs !== false && Object.keys(parsed.needs || {}).length) {
+      // pola mingguan = nilai terbanyak per hari; tanggal yang berbeda menjadi custom per tanggal
+      const weekly = {};
+      for (let w = 0; w < 7; w++) weekly[w] = Object.assign({}, s.config.weekly[w] || {});
+      for (const [code, byDay] of Object.entries(parsed.needs)) {
+        for (let w = 0; w < 7; w++) {
+          const freq = new Map();
+          for (const [d, n] of Object.entries(byDay)) if (+d <= N && weekday(s.period, +d) === w) freq.set(n, (freq.get(n) || 0) + 1);
+          if (freq.size) weekly[w][code] = [...freq.entries()].sort((a, b) => b[1] - a[1] || a[0] - b[0])[0][0];
+        }
+      }
+      s.config.weekly = weekly;
+      for (const [code, byDay] of Object.entries(parsed.needs)) {
+        for (const [d, n] of Object.entries(byDay)) {
+          if (+d > N) continue;
+          const o = s.config.days[d];
+          if (o && o.need) delete o.need[code];
+          if (n !== weekly[weekday(s.period, +d)][code]) {
+            const x = s.config.days[d] || { need: {} };
+            x.need = Object.assign({}, x.need, { [code]: n });
+            s.config.days[d] = x;
+          } else if (o && !o.closed && !Object.keys(o.need || {}).length) delete s.config.days[d];
+        }
+      }
+      res.needs = true;
+    }
+    parsed.rows.forEach((row, i) => {
+      const e = map[i];
+      if (!e) return;
+      if (!s.config.employees.includes(e)) {
+        s.config.employees.push(e);
+        if (!s.config.rules[e]) s.config.rules[e] = { maxWeek: 0, maxRun: 0 };
+      }
+      const cells = {};
+      const man = {};
+      for (const [d, v] of Object.entries(row.cells)) {
+        if (+d > N) continue;
+        cells[d] = v;
+        man[d] = true;
+        res.cells++;
+      }
+      s.assignments[e] = cells;
+      if (opt.manual !== false) s.config.manual[e] = man;
+      else delete s.config.manual[e];
+      res.employees++;
+    });
+    return res;
+  }
+
   /* ---------------------------- Penyimpanan ---------------------------- */
   const sched = {
     OFF, WEEKDAYS, WD3, UNITS, DEFAULT_SHIFTS, DEFAULT_RULE, PALETTE,
-    daysIn, weekday, idOf, hours, parseDays, fmtDays, blank, normalize, ruleOf, describeRule, needOf, quotaFor, generate, check, validate, payload, allowed,
+    daysIn, weekday, weeksOf, idOf, hours, parseSheets, parseWorkbook, matchEmployee, applyImport, periodOf, timeOf, parseDays, fmtDays, blank, normalize, ruleOf, describeRule, needOf, quotaFor, generate, check, validate, payload, allowed,
 
     async get(period, unit) {
       const rec = await NP.db.get('schedules', idOf(period, unit));
@@ -490,6 +764,74 @@
       });
     },
 
+    /** PDF A4 landscape: tabel jadwal berwarna per shift, jumlah petugas per hari, keterangan shift. */
+    async pdf(s, empMap) {
+      const N = daysIn(s.period);
+      const C = check(s);
+      const rgb = (hex) => [1, 3, 5].map((i) => parseInt(String(hex || '#6b7280').slice(i, i + 2), 16) || 0);
+      const tint = (hex, k) => rgb(hex).map((v) => Math.round(v + (255 - v) * k));
+      const dayHead = [];
+      for (let d = 1; d <= N; d++) dayHead.push(d + '\n' + WD3[weekday(s.period, d)]);
+      const sundayCol = (i) => i >= 1 && i <= N && weekday(s.period, i) === 0;
+      const colorCells = (data) => {
+        const i = data.column.index;
+        if (i >= 1 && i <= N && weekEdge(s.period, i)) data.cell.styles.lineWidth = Object.assign({ top: 0.1, right: 0.1, bottom: data.section === 'body' ? 0.35 : 0.1 }, { left: 0.7 });
+        else if (data.section === 'body') data.cell.styles.lineWidth = { top: 0.1, right: 0.1, left: 0.1, bottom: 0.35 };
+        if (data.section === 'head' && sundayCol(i)) data.cell.styles.textColor = [254, 202, 202];
+        if (data.section !== 'body' || i < 1 || i > N) return;
+        const v = data.cell.raw;
+        const sh = shiftOf(s, v);
+        if (sh) {
+          data.cell.styles.fillColor = tint(sh.color, 0.78);
+          data.cell.styles.textColor = rgb(sh.color).map((x) => Math.round(x * 0.6));
+          data.cell.styles.fontStyle = 'bold';
+        } else if (v === OFF) data.cell.styles.textColor = [148, 163, 184];
+        else if (typeof v === 'string' && v.includes('/') && data.row.raw && data.row.raw.short && data.row.raw.short[i]) data.cell.styles.textColor = [220, 38, 38];
+      };
+      const base = { styles: { fontSize: 6.4, cellPadding: 0.7, halign: 'center', valign: 'middle', lineColor: [203, 213, 225], lineWidth: 0.1, overflow: 'linebreak' }, headStyles: { fillColor: [0, 107, 42], textColor: 255, fontStyle: 'bold', fontSize: 6.2, halign: 'center' }, alternateRowStyles: { fillColor: [244, 246, 249] }, columnStyles: { 0: { halign: 'left', cellWidth: 36, fontSize: 6.8 } }, margin: { left: 8, right: 8 }, didParseCell: colorCells };
+      const body = s.config.employees.map((e) => {
+        const emp = empMap.get(e) || { name: e, position: '' };
+        const row = [emp.name + (emp.position ? '\n' + emp.position : '')];
+        for (let d = 1; d <= N; d++) row.push(((s.assignments[e] || {})[d]) || '');
+        row.push(C.byEmp[e].work, C.byEmp[e].off);
+        return row;
+      });
+      const counts = s.config.shifts.map((sh) => {
+        const row = [sh.code + ' · ' + sh.name];
+        const short = {};
+        for (let d = 1; d <= N; d++) {
+          const b = C.byDay[d];
+          row.push(b.closed ? '–' : (b.count[sh.code] || 0) + '/' + b.need[sh.code]);
+          if (!b.closed && b.short[sh.code]) short[d] = true;
+        }
+        row.push('', '');
+        row.short = short;
+        return row;
+      });
+      const set = (NP.state && NP.state.settings) || {};
+      return NP.exp.pdfTable({
+        orientation: 'landscape',
+        unit: s.unit === 'APT' ? 'APT' : 'KLINIK',
+        headerName: s.unit === 'ALL' ? (set.company && set.company.name) || undefined : undefined,
+        title: 'JADWAL MASUK — ' + u.periodLabel(s.period).toUpperCase(),
+        subtitle: UNITS[s.unit] + ' · ' + s.config.employees.length + ' karyawan' + (s.version ? ' · versi ' + s.version : '') + (s.dirty ? ' · BELUM DISIMPAN' : ''),
+        sections: [
+          {
+            body,
+            tableOpts: Object.assign({}, base, {
+              head: [
+                [{ content: 'Karyawan', rowSpan: 2, styles: { valign: 'bottom', halign: 'left' } }].concat(weeksOf(s.period).map((w) => ({ content: (w.to - w.from + 1 <= 2 ? 'Mg ' : 'Minggu ') + w.no, colSpan: w.to - w.from + 1, styles: { fillColor: w.no % 2 ? [0, 107, 42] : [0, 84, 33] } })), [{ content: 'Masuk', rowSpan: 2 }, { content: 'Libur', rowSpan: 2 }]),
+                dayHead
+              ]
+            })
+          },
+          { title: 'Jumlah petugas per hari (terisi/ideal)', head: ['Shift'].concat(dayHead, ['', '']), body: counts, tableOpts: base },
+          { title: 'Keterangan', head: ['Kode', 'Nama shift', 'Jam', 'Lama (jam)', 'Ideal / minimal'], body: s.config.shifts.map((sh) => [sh.code, sh.name, sh.start + '–' + sh.end, hours(sh), sh.min === undefined || sh.min === null ? 'sesuai kebutuhan' : 'minimal ' + sh.min + ' bila ada yang libur']).concat([[OFF, 'Libur', '', '', '']]), tableOpts: { styles: { fontSize: 7.5, cellPadding: 1.2 }, tableWidth: 160, margin: { left: 8 } } }
+        ],
+        filename: 'jadwal-masuk-' + s.period + '-' + s.unit.toLowerCase() + '.pdf'
+      });
+    },
+
     /** Tabel Excel: baris karyawan, kolom tanggal. */
     toSheets(s, empMap) {
       const N = daysIn(s.period);
@@ -510,7 +852,7 @@
       }
       aoa.push([]);
       for (const sh of s.config.shifts) {
-        const row = ['Jumlah ' + sh.code, 'butuh / terisi'];
+        const row = ['Jumlah ' + sh.code, 'terisi / ideal'];
         for (let d = 1; d <= N; d++) {
           const b = C.byDay[d];
           row.push(b.closed ? 'tutup' : (b.count[sh.code] || 0) + '/' + b.need[sh.code]);
@@ -526,7 +868,7 @@
   /* =============================== Halaman =============================== */
   // Isian yang belum disimpan tetap ada selama aplikasi terbuka (per bulan & unit).
   const drafts = new Map();
-  const st = { period: null, unit: 'ALL', tab: 'grid', brush: null, mode: 'fair', keepManual: true };
+  const st = { period: null, unit: 'ALL', tab: 'grid', brush: null, mode: 'fair', keepManual: true, manualOffWeek: true };
 
   async function render(view, params) {
     const ui = NP.ui;
@@ -554,6 +896,8 @@
       <div class="page-head">
         <div><h2>Jadwal Masuk</h2><p class="muted">Susun jadwal kerja bulanan: atur shift dan kebutuhan petugas per hari, pilih karyawan beserta ketentuannya, lalu buat jadwal otomatis (merata atau acak) dan sesuaikan per sel.</p></div>
         <div class="actions">
+          ${canEdit ? `<button type="button" class="btn btn-ghost" data-act="import">${ui.icon('upload')}<span>Impor Excel</span></button>` : ''}
+          <button type="button" class="btn btn-ghost" data-act="pdf">${ui.icon('pdf')}<span>PDF</span></button>
           <button type="button" class="btn btn-ghost" data-act="xls">${ui.icon('excel')}<span>Excel</span></button>
           <button type="button" class="btn btn-ghost" data-act="print">${ui.icon('print')}<span>Cetak</span></button>
         </div>
@@ -615,7 +959,7 @@
       for (let d = 1; d <= N; d++) {
         const w = weekday(s.period, d);
         const b = r.byDay[d];
-        head.push(`<th class="sch-d ${w === 0 ? 'sun' : ''} ${b.closed ? 'closed' : ''} ${b.custom ? 'custom' : ''}" title="${WEEKDAYS[w]}, ${d}${b.closed ? ' — tutup' : ''}"><span>${d}</span><small>${WD3[w]}</small></th>`);
+        head.push(`<th class="sch-d ${w === 0 ? 'sun' : ''} ${weekEdge(s.period, d) ? 'wk' : ''} ${b.closed ? 'closed' : ''} ${b.custom ? 'custom' : ''}" title="${WEEKDAYS[w]}, ${d}${b.closed ? ' — tutup' : ''}"><span>${d}</span><small>${WD3[w]}</small></th>`);
       }
       const rows = emps.map((e) => {
         const emp = empMap.get(e) || { name: e + ' (tidak ditemukan)', position: '' };
@@ -627,9 +971,15 @@
           const sh = shiftOf(s, v);
           const man = !!((s.config.manual[e] || {})[d]);
           const closed = r.byDay[d].closed;
-          cells.push(`<td class="sch-c ${v === OFF ? 'off' : ''} ${closed ? 'closed' : ''} ${bad.has(d) ? 'bad' : ''}"><button type="button" data-e="${u.esc(e)}" data-d="${d}" ${sh ? `style="--sc:${u.esc(sh.color)}"` : ''} class="${sh ? 'on' : ''} ${man ? 'man' : ''}" title="${u.esc(emp.name)} · ${d} ${WD3[weekday(s.period, d)]}${sh ? ' · ' + u.esc(sh.name) + ' ' + sh.start + '–' + sh.end : v === OFF ? ' · Libur' : ''}${man ? ' · diisi manual' : ''}${bad.has(d) ? ' · ' + u.esc(bad.get(d)) : ''}" ${canEdit ? '' : 'disabled'}>${u.esc(v)}</button></td>`);
+          cells.push(`<td class="sch-c ${v === OFF ? 'off' : ''} ${weekEdge(s.period, d) ? 'wk' : ''} ${closed ? 'closed' : ''} ${bad.has(d) ? 'bad' : ''}"><button type="button" data-e="${u.esc(e)}" data-d="${d}" ${sh ? `style="--sc:${u.esc(sh.color)}"` : ''} class="${sh ? 'on' : ''} ${man ? 'man' : ''}" title="${u.esc(emp.name)} · ${d} ${WD3[weekday(s.period, d)]}${sh ? ' · ' + u.esc(sh.name) + ' ' + sh.start + '–' + sh.end : v === OFF ? ' · Libur' : ''}${man ? ' · diisi manual' : ''}${bad.has(d) ? ' · ' + u.esc(bad.get(d)) : ''}" ${canEdit ? '' : 'disabled'}>${u.esc(v)}</button></td>`);
         }
-        return `<tr><th class="sch-name" scope="row"><b>${u.esc(emp.name)}</b><small>${u.esc(emp.position || '')}</small></th>${cells.join('')}
+        const perWeek = weeksOf(s.period).map((w) => {
+          const v = [];
+          for (let d = w.from; d <= w.to; d++) v.push((s.assignments[e] || {})[d]);
+          const sh = s.config.shifts.map((x) => v.filter((c) => c === x.code).length + x.code).join(' ');
+          return 'Mg ' + w.no + ': ' + sh + ' ' + v.filter((c) => c === OFF).length + 'L';
+        });
+        return `<tr><th class="sch-name" scope="row" title="${u.esc(perWeek.join('\n'))}"><b>${u.esc(emp.name)}</b><small>${u.esc(emp.position || '')}</small></th>${cells.join('')}
           <td class="sch-tot"><b>${x.work}</b></td><td class="sch-tot">${x.off}</td><td class="sch-tot">${u.num(Math.round(x.hours))}</td></tr>`;
       });
       const foot = s.config.shifts.map((sh) => {
@@ -637,7 +987,7 @@
         for (let d = 1; d <= N; d++) {
           const b = r.byDay[d];
           const n = b.count[sh.code] || 0;
-          c.push(`<td class="sch-f ${b.closed ? 'closed' : b.short[sh.code] ? 'short' : b.under[sh.code] ? 'under' : ''}" title="${sh.name} tanggal ${d}: ${n} orang · ideal ${b.closed ? 'tutup' : b.need[sh.code]}${!b.closed && b.min[sh.code] < b.need[sh.code] ? ', minimal ' + b.min[sh.code] : ''}">${b.closed ? '–' : n + '/' + b.need[sh.code]}</td>`);
+          c.push(`<td class="sch-f ${weekEdge(s.period, d) ? 'wk' : ''} ${b.closed ? 'closed' : b.short[sh.code] ? 'short' : b.under[sh.code] ? 'under' : ''}" title="${sh.name} tanggal ${d}: ${n} orang · ideal ${b.closed ? 'tutup' : b.need[sh.code]}${!b.closed && b.min[sh.code] < b.need[sh.code] ? ', minimal ' + b.min[sh.code] : ''}">${b.closed ? '–' : n + '/' + b.need[sh.code]}</td>`);
         }
         return `<tr><th class="sch-name" scope="row"><span class="sch-key" style="--sc:${u.esc(sh.color)}">${u.esc(sh.code)}</span> ${u.esc(sh.name)}</th>${c.join('')}<td colspan="3"></td></tr>`;
       });
@@ -659,11 +1009,12 @@
             <div class="sch-gen">
               <label class="field-inline">Cara <select id="sc-mode">${ui.options([['fair', 'Merata (adil)'], ['random', 'Acak penuh']], st.mode)}</select></label>
               <label class="check"><input type="checkbox" id="sc-keep" ${st.keepManual ? 'checked' : ''}><span>Pertahankan isian manual</span></label>
+              <label class="check" title="Bila Anda menandai libur (L) secara manual, karyawan itu tidak diberi libur acak lagi pada minggu yang sama"><input type="checkbox" id="sc-offweek" ${st.manualOffWeek ? 'checked' : ''} ${st.keepManual ? '' : 'disabled'}><span>Libur manual menggantikan libur acak (minggu itu)</span></label>
               <button type="button" class="btn btn-ghost btn-sm" data-act="clear">${ui.icon('trash')}<span>Kosongkan jadwal</span></button>
             </div>
           </div>
           <p class="muted small">Sel bertitik = diisi manual (dipertahankan saat <b>Buat jadwal acak</b> bila dicentang). Sel merah melanggar ketentuan karyawan. Angka bawah = terisi/ideal per shift: <span class="txt-warn">oranye</span> di bawah ideal tetapi masih memenuhi minimal, <span class="txt-danger">merah</span> di bawah minimal.</p>` : ''}
-          <div class="sch-wrap"><table class="sch-grid"><thead><tr><th class="sch-name">Karyawan</th>${head.join('')}<th class="sch-tot" title="Hari masuk">Masuk</th><th class="sch-tot" title="Hari libur">Libur</th><th class="sch-tot" title="Total jam">Jam</th></tr></thead>
+          <div class="sch-wrap"><table class="sch-grid"><thead><tr class="sch-wkrow"><th class="sch-name" rowspan="2">Karyawan</th>${weeksOf(s.period).map((w) => `<th class="sch-wk ${w.no % 2 ? '' : 'alt'} ${w.from > 1 ? 'wk' : ''}" colspan="${w.to - w.from + 1}" title="Minggu ${w.no}: tanggal ${w.from}–${w.to}">${w.to - w.from + 1 <= 2 ? 'Mg ' + w.no : 'Minggu ' + w.no + `<small>${w.from}–${w.to}</small>`}</th>`).join('')}<th class="sch-tot" rowspan="2" title="Hari masuk">Masuk</th><th class="sch-tot" rowspan="2" title="Hari libur">Libur</th><th class="sch-tot" rowspan="2" title="Total jam">Jam</th></tr><tr class="sch-dayrow">${head.join('')}</tr></thead>
             <tbody>${rows.join('')}</tbody><tfoot>${foot.join('')}</tfoot></table></div>
           ${shortList.length || issueList.length ? `<div class="sch-notes">
             ${shortList.length ? `<div class="alert alert-warning">${ui.icon('warn')}<div><b>Di bawah jumlah minimal (${shortList.length})</b><ul>${shortList.slice(0, 8).map((x) => `<li>${x}</li>`).join('')}</ul>${shortList.length > 8 ? `<small>dan ${shortList.length - 8} lainnya</small>` : ''}<small class="block">Tambah karyawan, longgarkan ketentuan, atau kurangi kebutuhan pada tab <b>Shift &amp; kebutuhan per hari</b>.</small></div></div>` : ''}
@@ -711,6 +1062,8 @@
               <div class="sch-line"><span class="sch-lbl">Boleh masuk shift</span><div class="sch-val chips">${s.config.shifts.map((sh) => `<label class="chip-check"><input type="checkbox" data-rs="${u.esc(sh.code)}" ${!Array.isArray(r.shifts) || r.shifts.includes(sh.code) ? 'checked' : ''} ${dis}><span title="${u.esc(sh.name)}">${u.esc(sh.name)}</span></label>`).join('')}</div></div>
               <div class="sch-line"><span class="sch-lbl">Selalu libur setiap</span><div class="sch-val chips">${[1, 2, 3, 4, 5, 6, 0].map((w) => `<label class="chip-check off"><input type="checkbox" data-ro="${w}" ${r.offDays.includes(w) ? 'checked' : ''} ${dis}><span title="${WEEKDAYS[w]}">${WD3[w]}</span></label>`).join('')}</div></div>
               <div class="sch-line"><span class="sch-lbl">Pembagian per minggu</span><div class="sch-val sch-q">${s.config.shifts.map((sh) => `<label><input type="number" min="0" max="7" data-rq="${u.esc(sh.code)}" value="${sh.code in r.quota ? r.quota[sh.code] : ''}" placeholder="–" ${dis} aria-label="Jumlah ${u.esc(sh.name)} per minggu"><span>× ${u.esc(sh.name)}</span></label>`).join('<span class="muted">+</span>')}<small class="muted">kosong = bebas</small></div></div>
+              <div class="sch-line"><span class="sch-lbl">Selalu shift tertentu pada hari</span><div class="sch-val sch-fixed">${[1, 2, 3, 4, 5, 6, 0].map((w) => `<label class="${r.fixed[w] ? 'on' : ''}"><small>${WD3[w]}</small><select data-rf="${w}" ${dis} aria-label="Shift tetap setiap ${WEEKDAYS[w]}" title="${r.fixed[w] ? u.esc((shiftOf(s, r.fixed[w]) || {}).name || '') : 'bebas'}"><option value="">–</option>${s.config.shifts.map((sh) => `<option value="${u.esc(sh.code)}" ${r.fixed[w] === sh.code ? 'selected' : ''}>${u.esc(sh.code)}</option>`).join('')}</select></label>`).join('')}<small class="muted sch-fixed-note">– = bebas · ${s.config.shifts.map((sh) => u.esc(sh.code) + ' = ' + u.esc(sh.name)).join(' · ')}</small></div></div>
+              <div class="sch-line"><span class="sch-lbl">Bila ada karyawan lain libur</span><div class="sch-val"><select data-rb ${dis} aria-label="Prioritas bila ada yang libur"><option value="">tidak ada prioritas</option>${s.config.shifts.map((sh) => `<option value="${u.esc(sh.code)}" ${r.backup === sh.code ? 'selected' : ''}>prioritas masuk ${u.esc(sh.name)}</option>`).join('')}</select></div></div>
             </div>
             <div class="sch-rg">
               <label class="sch-line"><span class="sch-lbl">Libur paling banyak</span><span class="sch-val">${num('maxOff', r.maxOff, 31, 'Libur paling banyak per bulan')}<span>hari dalam sebulan</span></span></label>
@@ -719,7 +1072,7 @@
               <label class="sch-line"><span class="sch-lbl">Masuk paling banyak</span><span class="sch-val">${num('maxMonth', r.maxMonth, 31, 'Masuk paling banyak per bulan')}<span>hari dalam sebulan</span></span></label>
               <label class="sch-line"><span class="sch-lbl">Tidak bisa masuk tanggal</span><span class="sch-val"><input data-ru value="${u.esc(fmtDays(r.unavailable))}" placeholder="mis. 3, 10-12" ${dis} aria-label="Tanggal tidak bisa masuk"></span></label>
             </div>
-            <div class="sch-sum"><span>${ui.icon('info')} <b>Ringkasan:</b> ${u.esc(describeRule(s, r))}</span>${canEdit && s.config.employees.length > 1 ? `<button type="button" class="btn btn-ghost btn-sm" data-copyrule>${ui.icon('copy')}<span>Salin ke semua karyawan terpilih</span></button>` : ''}</div>
+            <div class="sch-sum"><span>${ui.icon('info')} <b>Ringkasan:</b> ${u.esc(describeRule(s, r))}</span>${canEdit && s.config.employees.length > 1 ? `<button type="button" class="btn btn-ghost btn-sm" data-copyrule>${ui.icon('copy')}<span>Salin ketentuan ke…</span></button>` : ''}</div>
             ${h.length ? `<div class="sch-hint">${ui.icon('warn')}<div>${h.map(u.esc).join('<br>')}</div></div>` : ''}
           </div>` : ''}
         </div>`;
@@ -735,10 +1088,12 @@
               <li><b>Libur maksimal 2 hari per bulan</b> → isi <i>Libur paling banyak</i> = 2, lalu kosongkan <i>Masuk paling banyak … per minggu</i> dan <i>Masuk berturut-turut</i> (batas itu memaksa libur lebih sering).</li>
               <li><b>Per minggu 3 kali Pagi dan 3 kali Siang</b> → isi <i>Pembagian per minggu</i>: 3 × Pagi + 3 × Siang (otomatis 1 hari libur per minggu).</li>
               <li><b>Selalu libur hari Minggu</b> → pilih <i>Min</i> pada <i>Selalu libur setiap</i>.</li>
+              <li><b>Selalu Pagi setiap Senin</b> (atau Siang/Malam hari tertentu) → pada <i>Selalu shift tertentu pada hari</i>, pilih Pagi di kolom <i>Sen</i>.</li>
+              <li><b>Bila ada yang libur, karyawan ini diutamakan masuk Pagi</b> → pilih <i>prioritas masuk Pagi</i> pada <i>Bila ada karyawan lain libur</i>.</li>
               <li><b>Cuti tanggal 10 sampai 12</b> → isi <i>Tidak bisa masuk tanggal</i> = 10-12.</li>
               <li><b>Siang cukup 1 orang bila ada yang libur</b> → di tab <i>Shift &amp; kebutuhan per hari</i>, isi kolom <i>Minimal bila ada yang libur</i> untuk Siang = 1.</li>
             </ul>
-            <p class="muted small">Gunakan <b>Salin ke semua karyawan terpilih</b> agar ketentuan yang sama berlaku untuk semua (tanggal tidak bisa masuk tidak ikut disalin).</p>
+            <p class="muted small">Gunakan <b>Salin ketentuan ke…</b> lalu pilih karyawan tujuan agar ketentuan yang sama berlaku untuk mereka (tanggal tidak bisa masuk tidak ikut disalin).</p>
           </details>
           ${list.length ? `<div class="sch-plist">${list.map(row).join('')}</div>` : ui.empty('Tidak ada karyawan aktif pada unit ini.', 'users')}
         </div>`;
@@ -793,6 +1148,39 @@
     }
 
     /* ------------------------------ Interaksi ------------------------------ */
+    /** Gambar ulang tab tanpa melompat ke atas: posisi gulir halaman & tabel serta kolom yang
+     *  sedang diisi (mis. setelah Tab ke kolom berikutnya) dipertahankan. */
+    const focusKey = (el) => {
+      if (!el || !body.contains(el) || el === body) return null;
+      const box = el.closest('[data-emp],[data-si],[data-day]');
+      const attr = ['data-rn', 'data-rq', 'data-rf', 'data-rb', 'data-ru', 'data-rs', 'data-ro', 'data-inc', 'data-sf', 'data-dn', 'data-dc', 'data-wn', 'data-e'].find((x) => el.hasAttribute(x));
+      if (!attr) return null;
+      const esc = (v) => (root.CSS && CSS.escape ? CSS.escape(v) : String(v).replace(/["\\]/g, '\\$&'));
+      const own = '[' + attr + '="' + esc(el.getAttribute(attr)) + '"]' + (attr === 'data-e' ? '[data-d="' + el.dataset.d + '"]' : '');
+      if (!box) return own;
+      const k = ['data-emp', 'data-si', 'data-day'].find((x) => box.hasAttribute(x));
+      return '[' + k + '="' + esc(box.getAttribute(k)) + '"] ' + own;
+    };
+    let pending = null;
+    function rerender(fn) {
+      pending = fn;
+      setTimeout(() => {
+        if (pending !== fn) return;
+        pending = null;
+        const y = window.scrollY;
+        const wrap = body.querySelector('.sch-wrap');
+        const sx = wrap ? wrap.scrollLeft : 0;
+        const key = focusKey(document.activeElement);
+        fn();
+        const w2 = body.querySelector('.sch-wrap');
+        if (w2) w2.scrollLeft = sx;
+        if (key) {
+          const el = body.querySelector(key);
+          if (el) el.focus({ preventScroll: true });
+        }
+        window.scrollTo(0, y);
+      }, 0);
+    }
     const setRule = (e, patch) => {
       s.config.rules[e] = Object.assign({}, s.config.rules[e] || {}, patch);
       markDirty();
@@ -813,11 +1201,7 @@
           s.config.manual[e][d] = true;
         }
         markDirty();
-        const y = body.querySelector('.sch-wrap');
-        const sx = y ? y.scrollLeft : 0;
-        drawGrid();
-        const y2 = body.querySelector('.sch-wrap');
-        if (y2) y2.scrollLeft = sx;
+        rerender(drawGrid);
         return;
       }
       const br = ev.target.closest('[data-brush]');
@@ -835,7 +1219,7 @@
           s.assignments = {};
           s.config.manual = {};
           markDirty();
-          drawGrid();
+          rerender(drawGrid);
         });
         return;
       }
@@ -843,7 +1227,7 @@
       if (all) {
         s.config.employees = all.dataset.act === 'all-in' ? [...new Set(s.config.employees.concat(pool.map((e) => e.id)))] : [];
         markDirty();
-        drawPeople();
+        rerender(drawPeople);
         return;
       }
       if (ev.target.closest('[data-act="add-shift"]')) {
@@ -851,22 +1235,50 @@
         const code = ['M', 'PS', 'SM', 'X', 'Y', 'Z'].find((c) => !used.has(c)) || 'S' + s.config.shifts.length;
         s.config.shifts.push({ code, name: code === 'M' ? 'Malam' : 'Shift ' + code, start: '21:00', end: '07:00', color: PALETTE[s.config.shifts.length % PALETTE.length] });
         markDirty();
-        drawNeeds();
+        rerender(drawNeeds);
         return;
       }
       const cp = ev.target.closest('[data-copyrule]');
       if (cp) {
         const src = cp.closest('[data-emp]').dataset.emp;
         const others = s.config.employees.filter((e) => e !== src);
-        const name = (empMap.get(src) || {}).name || src;
-        ui.confirm({ title: 'Salin ketentuan', html: `Terapkan ketentuan <b>${u.esc(name)}</b> (${u.esc(describeRule(s, ruleOf(s, src)))}) ke <b>${others.length} karyawan</b> lain di jadwal ini?<br><small>Tanggal tidak bisa masuk milik masing-masing karyawan tetap.</small>`, okLabel: 'Salin ketentuan' }).then((ok) => {
-          if (!ok) return;
-          const base = clone(s.config.rules[src] || {});
-          delete base.unavailable;
-          for (const e of others) s.config.rules[e] = Object.assign(clone(base), { unavailable: ((s.config.rules[e] || {}).unavailable || []).slice() });
-          markDirty();
-          drawPeople();
-          ui.toast('Ketentuan disalin ke ' + others.length + ' karyawan.');
+        const nm = (e) => (empMap.get(e) || {}).name || e;
+        const m = ui.modal({
+          title: 'Salin ketentuan',
+          size: 'md',
+          body: `<p>Salin ketentuan <b>${u.esc(nm(src))}</b>:</p>
+            <p class="sch-sum">${u.esc(describeRule(s, ruleOf(s, src)))}</p>
+            <p class="muted small">Pilih karyawan tujuan. Tanggal tidak bisa masuk milik masing-masing karyawan tidak ikut diubah.</p>
+            <label class="check"><input type="checkbox" id="cp-all"><span><b>Pilih semua</b></span></label>
+            <div class="sch-cplist">${others.map((e) => `<label class="check"><input type="checkbox" data-cpto="${u.esc(e)}"><span>${u.esc(nm(e))}<small class="block muted">${u.esc((empMap.get(e) || {}).position || '')} · ${u.esc(describeRule(s, ruleOf(s, e)))}</small></span></label>`).join('')}</div>
+            <div class="form-error" hidden></div>`,
+          actions: [
+            { label: 'Batal', cls: 'btn-ghost', onClick: (mm) => mm.close() },
+            {
+              label: 'Salin ketentuan', cls: 'btn-primary', icon: 'copy', onClick: (mm) => {
+                const to = [...mm.el.querySelectorAll('[data-cpto]:checked')].map((x) => x.dataset.cpto);
+                if (!to.length) {
+                  const er = mm.el.querySelector('.form-error');
+                  er.hidden = false;
+                  er.textContent = 'Pilih minimal satu karyawan tujuan.';
+                  return;
+                }
+                const base = clone(s.config.rules[src] || {});
+                delete base.unavailable;
+                for (const e of to) s.config.rules[e] = Object.assign(clone(base), { unavailable: ((s.config.rules[e] || {}).unavailable || []).slice() });
+                mm.close();
+                markDirty();
+                rerender(drawPeople);
+                ui.toast('Ketentuan ' + nm(src) + ' disalin ke ' + to.length + ' karyawan: ' + to.map(nm).join(', ') + '.');
+              }
+            }
+          ]
+        });
+        m.el.querySelector('#cp-all').onchange = (x) => m.el.querySelectorAll('[data-cpto]').forEach((c) => (c.checked = x.target.checked));
+        m.el.addEventListener('change', (x) => {
+          if (!x.target.dataset.cpto) return;
+          const all = [...m.el.querySelectorAll('[data-cpto]')];
+          m.el.querySelector('#cp-all').checked = all.every((c) => c.checked);
         });
         return;
       }
@@ -882,7 +1294,7 @@
             if (s.config.manual[e]) delete s.config.manual[e][d];
           }
           markDirty();
-          drawNeeds();
+          rerender(drawNeeds);
         });
         return;
       }
@@ -890,7 +1302,7 @@
       if (rs) {
         delete s.config.days[rs.closest('tr').dataset.day];
         markDirty();
-        drawNeeds();
+        rerender(drawNeeds);
       }
     });
     body.addEventListener('change', (ev) => {
@@ -901,34 +1313,45 @@
         const id = t.dataset.inc;
         s.config.employees = t.checked ? s.config.employees.concat(id) : s.config.employees.filter((x) => x !== id);
         markDirty();
-        return drawPeople();
+        return rerender(drawPeople);
       }
       const emp = tr && tr.dataset.emp;
       if (emp && t.dataset.rs) {
         const on = [...tr.querySelectorAll('[data-rs]')].filter((x) => x.checked).map((x) => x.dataset.rs);
         setRule(emp, { shifts: on.length === s.config.shifts.length ? null : on });
         if (!on.length) ui.toast('Karyawan tanpa shift yang boleh tidak akan dijadwalkan otomatis.', 'warning');
-        return drawPeople();
+        return rerender(drawPeople);
       }
       if (emp && t.dataset.ro !== undefined) {
         setRule(emp, { offDays: [...tr.querySelectorAll('[data-ro]')].filter((x) => x.checked).map((x) => +x.dataset.ro) });
-        return drawPeople();
+        return rerender(drawPeople);
       }
       if (emp && t.dataset.rn) {
         setRule(emp, { [t.dataset.rn]: Math.max(0, u.toInt(t.value) || 0) });
-        return drawPeople();
+        return rerender(drawPeople);
+      }
+      if (emp && t.dataset.rf !== undefined) {
+        const fx = Object.assign({}, ruleOf(s, emp).fixed);
+        if (t.value) fx[t.dataset.rf] = t.value;
+        else delete fx[t.dataset.rf];
+        setRule(emp, { fixed: fx });
+        return rerender(drawPeople);
+      }
+      if (emp && t.dataset.rb !== undefined) {
+        setRule(emp, { backup: t.value });
+        return rerender(drawPeople);
       }
       if (emp && t.dataset.rq) {
         const q = Object.assign({}, ruleOf(s, emp).quota);
         if (t.value === '') delete q[t.dataset.rq];
         else q[t.dataset.rq] = Math.max(0, Math.min(7, u.toInt(t.value) || 0));
         setRule(emp, { quota: q });
-        return drawPeople();
+        return rerender(drawPeople);
       }
       if (emp && t.dataset.ru !== undefined) {
         const list = parseDays(t.value, N);
         setRule(emp, { unavailable: list });
-        return drawPeople();
+        return rerender(drawPeople);
       }
       if (t.dataset.sf) {
         const i = +tr.dataset.si;
@@ -938,7 +1361,7 @@
           if (v === '') delete sh.min;
           else sh.min = Math.max(0, u.toInt(v) || 0);
           markDirty();
-          return drawNeeds();
+          return rerender(drawNeeds);
         }
         if (t.dataset.sf === 'code') {
           v = v.toUpperCase().replace(/[^A-Z0-9]/g, '').slice(0, 3);
@@ -958,18 +1381,26 @@
             o.need[v] = o.need[old];
             delete o.need[old];
           }
-          for (const r of Object.values(s.config.rules)) if (Array.isArray(r.shifts)) r.shifts = r.shifts.map((c) => (c === old ? v : c));
+          for (const r of Object.values(s.config.rules)) {
+            if (Array.isArray(r.shifts)) r.shifts = r.shifts.map((c) => (c === old ? v : c));
+            if (r.quota && old in r.quota) {
+              r.quota[v] = r.quota[old];
+              delete r.quota[old];
+            }
+            for (const w of Object.keys(r.fixed || {})) if (r.fixed[w] === old) r.fixed[w] = v;
+            if (r.backup === old) r.backup = v;
+          }
           if (st.brush === old) st.brush = v;
         }
         sh[t.dataset.sf] = v;
         markDirty();
-        return drawNeeds();
+        return rerender(drawNeeds);
       }
       if (t.dataset.wn) {
         const [w, c] = t.dataset.wn.split('|');
         s.config.weekly[w] = Object.assign({}, s.config.weekly[w] || {}, { [c]: Math.max(0, u.toInt(t.value) || 0) });
         markDirty();
-        return drawNeeds();
+        return rerender(drawNeeds);
       }
       if (t.dataset.dn !== undefined || t.dataset.dc !== undefined) {
         const d = tr.dataset.day;
@@ -982,11 +1413,113 @@
         if (!o.closed && !Object.keys(o.need).length) delete s.config.days[d];
         else s.config.days[d] = o;
         markDirty();
-        return drawNeeds();
+        return rerender(drawNeeds);
       }
       if (t.id === 'sc-mode') st.mode = t.value;
-      if (t.id === 'sc-keep') st.keepManual = t.checked;
+      if (t.id === 'sc-keep') {
+        st.keepManual = t.checked;
+        const o = body.querySelector('#sc-offweek');
+        if (o) o.disabled = !t.checked;
+      }
+      if (t.id === 'sc-offweek') st.manualOffWeek = t.checked;
     });
+
+    /* ---------------------------- Impor Excel ---------------------------- */
+    async function importFlow() {
+      const f = await ui.pickFile('.xlsx,.xls,.csv');
+      if (!f) return;
+      if (!root.XLSX) return ui.toast('Pustaka Excel (SheetJS) tidak tersedia.', 'error');
+      let parsed;
+      try {
+        parsed = parseWorkbook(XLSX.read(await ui.readFile(f, 'buffer'), { type: 'array' }), XLSX);
+      } catch (e) {
+        return ui.toast('File tidak dapat dibaca: ' + e.message, 'error');
+      }
+      if (!parsed.rows.length) return ui.toast(parsed.warnings[0] || 'Tabel jadwal tidak ditemukan.', 'error');
+      const staff = employees.slice().sort((x, y) => x.name.localeCompare(y.name, 'id'));
+      const auto = parsed.rows.map((r) => (matchEmployee(r.name, staff) || {}).id || '');
+      const period0 = parsed.period || st.period;
+      const wdCheck = (period) => {
+        let bad = 0;
+        for (const c of parsed.dayCols || []) if (c.wd && c.d <= daysIn(period) && WD3[weekday(period, c.d)].toLowerCase() !== c.wd) bad++;
+        return bad;
+      };
+      const shiftRows = parsed.codes.map((code) => {
+        const def = parsed.shifts.find((x) => x.code === code) || {};
+        const cur = shiftOf(drafts.get(idOf(period0, st.unit)) || s, code);
+        const st2 = !cur ? '<span class="flag flag-dup">baru — ditambahkan</span>' : def.start && (def.start !== cur.start || def.end !== cur.end) ? `<span class="flag flag-low">jam berbeda (sekarang ${cur.start}–${cur.end})</span>` : '<span class="flag flag-done">sama</span>';
+        return `<tr><td><b>${u.esc(code)}</b></td><td>${u.esc(def.name || (cur && cur.name) || '-')}</td><td>${def.start ? def.start + '–' + def.end : '<span class="muted">tidak ada di file</span>'}</td><td>${st2}</td></tr>`;
+      }).join('');
+      const m = ui.modal({
+        title: 'Impor jadwal dari Excel',
+        size: 'lg',
+        body: `<p class="muted small">${ui.icon('excel')} <b>${u.esc(f.name)}</b>${parsed.sheet ? ' · sheet ' + u.esc(parsed.sheet) : ''} · ${parsed.rows.length} baris karyawan</p>
+          <div class="grid-3">
+            <label class="field"><span>Bulan jadwal</span><input type="month" id="im-month" value="${period0}"><small class="muted">${parsed.period ? 'Terbaca dari nama sheet.' : 'Bulan tidak terbaca dari file — periksa kembali.'}</small></label>
+            <div class="field"><span>Unit jadwal tujuan</span><b>${u.esc(UNITS[st.unit])}</b><small class="muted">Ubah unit di halaman bila perlu.</small></div>
+          </div>
+          <div id="im-wd"></div>
+          ${parsed.codes.length ? `<h4>Shift di file</h4><div class="table-wrap"><table class="tbl"><thead><tr><th>Kode</th><th>Nama</th><th>Jam di file</th><th>Status</th></tr></thead><tbody>${shiftRows}</tbody></table></div>` : ''}
+          <h4>Karyawan</h4>
+          <p class="muted small">Nama di file dicocokkan otomatis dengan Data Karyawan (gelar & tanda baca diabaikan). Periksa dan ubah bila perlu; pilih <i>— lewati —</i> untuk tidak mengimpor baris tersebut.</p>
+          <div class="table-wrap table-cards"><table class="tbl im-rows"><thead><tr><th>Nama di file</th><th>Karyawan</th><th class="ta-right">Masuk</th><th class="ta-right">Libur</th><th>Catatan</th></tr></thead><tbody>
+            ${parsed.rows.map((r, i) => {
+              const v = Object.values(r.cells);
+              return `<tr data-ir="${i}"><td data-label="Nama di file"><b>${u.esc(r.name)}</b><small class="block muted">${u.esc(r.position || '')}</small></td>
+                <td data-label="Karyawan"><select data-imap="${i}">${ui.options(staff.map((e) => [e.id, e.name + (e.position ? ' · ' + e.position : '')]), auto[i], '— lewati —')}</select>${auto[i] ? '' : '<small class="block txt-warn">Tidak ditemukan otomatis</small>'}</td>
+                <td data-label="Masuk" class="ta-right">${v.filter((x) => x !== OFF).length}</td><td data-label="Libur" class="ta-right">${v.filter((x) => x === OFF).length}</td>
+                <td data-label="Catatan">${r.unknown.length ? `<span class="flag flag-low">diabaikan: ${u.esc(r.unknown.slice(0, 3).join(', '))}</span>` : '<span class="muted">—</span>'}</td></tr>`;
+            }).join('')}
+          </tbody></table></div>
+          <label class="check"><input type="checkbox" id="im-manual" checked><span>Tandai sebagai isian manual (dipertahankan saat <b>Buat jadwal acak</b>)</span></label>
+          <label class="check"><input type="checkbox" id="im-times" checked><span>Perbarui nama & jam shift dari file</span></label>
+          ${Object.keys(parsed.needs).length ? `<label class="check"><input type="checkbox" id="im-needs" checked><span>Pakai kebutuhan petugas per hari dari file (baris ${Object.keys(parsed.needs).map((c) => '"Jumlah ' + u.esc(c) + '"').join(', ')})</span></label>` : ''}
+          <p class="muted small">Jadwal karyawan yang diimpor pada bulan tersebut diganti dengan isi file; karyawan lain tidak berubah. Perubahan baru tersimpan setelah Anda menekan <b>Simpan jadwal</b>.</p>
+          <div class="form-error" hidden></div>`,
+        actions: [
+          { label: 'Batal', cls: 'btn-ghost', onClick: (mm) => mm.close() },
+          {
+            label: 'Impor jadwal', cls: 'btn-primary', icon: 'upload', onClick: async (mm) => {
+              const err = (msg) => {
+                const e = mm.el.querySelector('.form-error');
+                e.hidden = false;
+                e.textContent = msg;
+              };
+              const month = mm.el.querySelector('#im-month').value;
+              if (!/^\d{4}-\d{2}$/.test(month)) return err('Pilih bulan jadwal.');
+              const map = {};
+              const used = new Map();
+              mm.el.querySelectorAll('[data-imap]').forEach((x) => {
+                if (!x.value) return;
+                map[x.dataset.imap] = x.value;
+                used.set(x.value, (used.get(x.value) || 0) + 1);
+              });
+              if (!Object.keys(map).length) return err('Pilih minimal satu karyawan untuk diimpor.');
+              const dup = [...used.entries()].filter(([, n]) => n > 1).map(([id]) => (empMap.get(id) || {}).name || id);
+              if (dup.length) return err('Satu karyawan dipilih untuk lebih dari satu baris: ' + dup.join(', ') + '.');
+              const key2 = idOf(month, st.unit);
+              let target = drafts.get(key2);
+              if (!target || !target.dirty) target = (await sched.get(month, st.unit)) || blank(month, st.unit);
+              const res = applyImport(target, parsed, map, { manual: mm.el.querySelector('#im-manual').checked, updateTimes: mm.el.querySelector('#im-times').checked, needs: !!(mm.el.querySelector('#im-needs') || {}).checked });
+              target.dirty = true;
+              drafts.set(key2, target);
+              st.period = month;
+              st.tab = 'grid';
+              mm.close();
+              ui.toast('Jadwal diimpor: ' + res.employees + ' karyawan, ' + res.cells + ' isian' + (res.addedShifts.length ? ', shift baru ' + res.addedShifts.join(', ') : '') + (res.updatedShifts.length ? ', jam shift diperbarui ' + res.updatedShifts.join(', ') : '') + (res.needs ? ', kebutuhan petugas dari file' : '') + '. Tekan Simpan jadwal untuk menyimpan.');
+              render(view, {});
+            }
+          }
+        ]
+      });
+      const wdNote = () => {
+        const p = m.el.querySelector('#im-month').value;
+        const bad = /^\d{4}-\d{2}$/.test(p) ? wdCheck(p) : 0;
+        m.el.querySelector('#im-wd').innerHTML = bad > 2 ? `<div class="alert alert-warning">${ui.icon('warn')}<div>Nama hari pada kolom tanggal di file tidak cocok dengan ${u.esc(u.periodLabel(p))} (${bad} tanggal). Pastikan bulan jadwal sudah benar.</div></div>` : '';
+      };
+      m.el.querySelector('#im-month').addEventListener('change', wdNote);
+      wdNote();
+    }
 
     /* ----------------------------- Toolbar ----------------------------- */
     // pindah bulan/unit: isian yang belum disimpan tetap tersimpan sementara di memori
@@ -1006,6 +1539,11 @@
         if (!s.config.employees.length) return ui.toast('Jadwal masih kosong.', 'error');
         NP.exp.excel(sched.toSheets(s, empMap), 'jadwal-masuk-' + s.period + '-' + s.unit.toLowerCase() + '.xlsx');
       }
+      if (a.dataset.act === 'import') importFlow();
+      if (a.dataset.act === 'pdf') {
+        if (!s.config.employees.length) return ui.toast('Jadwal masih kosong.', 'error');
+        ui.busy('Membuat PDF jadwal…', () => sched.pdf(s, empMap)).catch((e) => ui.toast(e.message, 'error'));
+      }
       if (a.dataset.act === 'print') {
         if (!s.config.employees.length) return ui.toast('Jadwal masih kosong.', 'error');
         NP.exp.printHtml(printHtml(s, empMap), 'Jadwal Masuk ' + u.periodLabel(s.period));
@@ -1022,7 +1560,7 @@
         }
         const hasFill = Object.values(s.assignments).some((c) => Object.keys(c).length);
         if (hasFill && !(await ui.confirm({ title: 'Buat jadwal acak', message: 'Isian jadwal ' + u.periodLabel(s.period) + ' akan diganti' + (st.keepManual ? ' (isian manual dipertahankan)' : ' seluruhnya') + '. Lanjutkan?', okLabel: 'Buat jadwal' }))) return;
-        const g = generate(s, { mode: st.mode, keepManual: st.keepManual, seed: (Date.now() ^ Math.floor(Math.random() * 1e9)) >>> 0 });
+        const g = generate(s, { mode: st.mode, keepManual: st.keepManual, manualOffWeek: st.manualOffWeek, seed: (Date.now() ^ Math.floor(Math.random() * 1e9)) >>> 0 });
         s.assignments = g.assignments;
         if (!st.keepManual) s.config.manual = {};
         markDirty();
@@ -1055,18 +1593,18 @@
     const set = (NP.state && NP.state.settings) || {};
     const company = (set.company && set.company.name) || 'Noura';
     const head = [];
-    for (let d = 1; d <= N; d++) head.push(`<th class="${weekday(s.period, d) === 0 ? 'sun' : ''}">${d}<br><small>${WD3[weekday(s.period, d)]}</small></th>`);
+    for (let d = 1; d <= N; d++) head.push(`<th class="${weekday(s.period, d) === 0 ? 'sun' : ''} ${weekEdge(s.period, d) ? 'wk' : ''}">${d}<br><small>${WD3[weekday(s.period, d)]}</small></th>`);
     const rows = s.config.employees.map((e) => {
       const emp = empMap.get(e) || { name: e, position: '' };
       const c = [];
       for (let d = 1; d <= N; d++) {
         const v = (s.assignments[e] || {})[d] || '';
         const sh = shiftOf(s, v);
-        c.push(`<td class="${v === OFF ? 'off' : ''} ${weekday(s.period, d) === 0 ? 'sun' : ''}" ${sh ? `style="background:${u.esc(sh.color)}22"` : ''}>${u.esc(v)}</td>`);
+        c.push(`<td class="${v === OFF ? 'off' : ''} ${weekday(s.period, d) === 0 ? 'sun' : ''} ${weekEdge(s.period, d) ? 'wk' : ''}" ${sh ? `style="background:${u.esc(sh.color)}22"` : ''}>${u.esc(v)}</td>`);
       }
       return `<tr><td class="nm"><b>${u.esc(emp.name)}</b><br><small>${u.esc(emp.position || '')}</small></td>${c.join('')}<td>${r.byEmp[e].work}</td><td>${r.byEmp[e].off}</td></tr>`;
     });
-    return `<style>@page{size:A4 landscape;margin:8mm}.sch-print{font-family:Arial,Helvetica,sans-serif;color:#111;font-size:9px}.sch-print h1{font-size:15px;margin:0 0 2px}.sch-print p{margin:0 0 6px;color:#444}.sch-print table{border-collapse:collapse;width:100%}.sch-print th,.sch-print td{border:1px solid #bbb;padding:2px 1px;text-align:center}.sch-print td.nm{text-align:left;white-space:nowrap;padding:2px 4px}.sch-print .off{color:#888}.sch-print .sun{background:#fef2f2}.sch-print .lg{margin-top:6px}.sch-print .lg span{margin-right:12px}</style>
+    return `<style>@page{size:A4 landscape;margin:8mm}.sch-print{font-family:Arial,Helvetica,sans-serif;color:#111;font-size:9px}.sch-print h1{font-size:15px;margin:0 0 2px}.sch-print p{margin:0 0 6px;color:#444}.sch-print table{border-collapse:collapse;width:100%}.sch-print th,.sch-print td{border:1px solid #bbb;padding:2px 1px;text-align:center}.sch-print td.nm{text-align:left;white-space:nowrap;padding:2px 4px}.sch-print .off{color:#888}.sch-print .sun{background:#fef2f2}.sch-print .wk{border-left:2px solid #006b2a}.sch-print tbody tr{border-bottom:2px solid #94a3b8}.sch-print tbody tr td{border-bottom:1.5px solid #94a3b8}.sch-print tbody tr:nth-child(even) td.nm{background:#f1f5f9}.sch-print .lg{margin-top:6px}.sch-print .lg span{margin-right:12px}</style>
       <div class="sch-print"><h1>Jadwal Masuk — ${u.esc(company)}</h1><p>${u.esc(UNITS[s.unit])} · ${u.esc(u.periodLabel(s.period))}${s.version ? ' · versi ' + s.version : ''}</p>
       <table><thead><tr><th>Karyawan</th>${head.join('')}<th>Masuk</th><th>Libur</th></tr></thead><tbody>${rows.join('')}</tbody></table>
       <div class="lg">${s.config.shifts.map((sh) => `<span><b>${u.esc(sh.code)}</b> = ${u.esc(sh.name)} (${sh.start}–${sh.end})</span>`).join('')}<span><b>L</b> = Libur</span></div></div>`;

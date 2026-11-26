@@ -285,3 +285,26 @@
 .sch-f.under { color: var(--warning); font-weight: 700; }
 .txt-warn { color: var(--warning); font-weight: 700; }
 .sch-shifts .sch-min { width: 90px; }
+.sch-fixed { display: grid; grid-template-columns: repeat(7, minmax(0, 1fr)); gap: 4px; max-width: 420px; }
+.sch-fixed-note { grid-column: 1 / -1; font-size: 11.5px; }
+.sch-fixed label { display: grid; gap: 2px; text-align: center; }
+.sch-fixed small { font-size: 11px; font-weight: 700; color: var(--muted); }
+.sch-fixed select { min-height: 32px; padding: 2px 2px; font-size: 12px; text-align: center; min-width: 0; }
+.sch-fixed label.on select { border-color: var(--primary); background: color-mix(in srgb, var(--primary) 10%, var(--surface)); font-weight: 700; }
+select[data-rb] { min-height: 34px; max-width: 260px; }
+@container (max-width: 430px) { .sch-fixed { grid-template-columns: repeat(4, minmax(0, 1fr)); } }
+/* batas minggu & pemisah per nama */
+.sch-grid thead tr.sch-wkrow th { top: 0; padding: 3px 4px; font-size: 11.5px; height: 30px; }
+.sch-grid thead tr.sch-dayrow th { top: 30px; }
+.sch-grid thead th.sch-name { vertical-align: bottom; }
+.sch-wk { color: var(--primary); }
+.sch-wk.alt { background: color-mix(in srgb, var(--primary) 9%, var(--surface-2)) !important; }
+.sch-wk small { margin-left: 6px; font-weight: 500; color: var(--muted); }
+.sch-grid .wk { border-left: 2px solid var(--primary) !important; }
+.sch-grid tbody th, .sch-grid tbody td { border-bottom: 2px solid var(--border-strong); }
+.sch-grid tbody tr:nth-child(even) > th, .sch-grid tbody tr:nth-child(even) > td { background: var(--surface-2); }
+.sch-grid tbody tr:hover > th, .sch-grid tbody tr:hover > td { background: color-mix(in srgb, var(--primary) 7%, var(--surface)); }
+.sch-grid tbody tr > th.sch-name { border-right: 2px solid var(--border-strong); }
+.sch-cplist { display: grid; gap: 2px; max-height: 50vh; overflow: auto; padding: 4px 8px; border: 1px solid var(--border); border-radius: 8px; }
+.sch-cplist .check { margin: 4px 0; align-items: flex-start; }
+.sch-cplist .check input { margin-top: 3px; }

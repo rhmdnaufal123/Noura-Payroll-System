@@ -1123,6 +1123,21 @@ async function step(name, fn) {
       await page.waitForFunction((el) => !el.isConnected, old);
     }
     assert.ok(/per minggu 3× Pagi \+ 3× Siang/.test(await page.locator(`.sch-p[data-emp="${ids[3]}"] .sch-sum`).innerText()));
+    // karyawan 3: selalu Pagi setiap Senin; mengubah ketentuan tidak membuat halaman melompat ke atas
+    const rf = page.locator(`.sch-p[data-emp="${ids[2]}"] [data-rf="1"]`);
+    await rf.scrollIntoViewIfNeeded();
+    const y0 = await ev(() => window.scrollY);
+    assert.ok(y0 > 200, 'halaman sudah digulir: ' + y0);
+    let oldList = await page.$('.sch-plist');
+    await rf.selectOption('P');
+    await page.waitForFunction((el) => !el.isConnected, oldList);
+    await page.waitForTimeout(100);
+    assert.strictEqual(await ev(() => window.scrollY), y0, 'posisi gulir tetap');
+    oldList = await page.$('.sch-plist');
+    await page.locator(`.sch-p[data-emp="${ids[0]}"] [data-rb]`).selectOption('P');
+    await page.waitForFunction((el) => !el.isConnected, oldList);
+    assert.ok(/selalu Pagi tiap Senin/.test(await page.locator(`.sch-p[data-emp="${ids[2]}"] .sch-sum`).innerText()));
+    assert.ok(/prioritas Pagi bila ada yang libur/.test(await page.locator(`.sch-p[data-emp="${ids[0]}"] .sch-sum`).innerText()));
     // custom per hari: tanggal 14 butuh 2 Pagi, tanggal 15 tutup
     await page.click('[data-tab=needs]');
     await page.waitForSelector('.sch-days');
@@ -1150,17 +1165,30 @@ async function step(name, fn) {
         sun0: sundays.map((d) => cell(ids[0], d)),
         s1: [...Array(28)].map((_, i) => cell(ids[1], i + 1)).filter((v) => v === 'S').length,
         week3: [2, 3, 4, 5, 6, 7, 8].map((d) => cell(ids[3], d)).join(''),
+        mon2: [2, 9, 16, 23].map((d) => cell(ids[2], d)),
         bad: document.querySelectorAll('.sch-c.bad').length
       };
     }, ids);
     assert.ok(grid.p14 >= 2, 'tanggal 14 minimal 2 Pagi');
     assert.deepStrictEqual([grid.d15, grid.sun0, grid.s1, grid.bad], [['L', 'L', 'L', 'L'], ['L', 'L', 'L', 'L'], 0, 0]);
     assert.deepStrictEqual([grid.week3.split('P').length - 1, grid.week3.split('S').length - 1], [3, 3], 'pembagian minggu 2–8: ' + grid.week3);
+    assert.deepStrictEqual(grid.mon2, ['P', 'P', 'P', 'P'], 'selalu Pagi setiap Senin');
     assert.ok(/Belum disimpan/.test(await page.locator('#sc-state').innerText()));
     // isi manual: kuas Libur pada karyawan 3 tanggal 3
     await page.click('[data-brush="L"]');
     await page.click(`.sch-c button[data-e="${ids[2]}"][data-d="3"]`);
     await page.waitForFunction((e) => { const b = document.querySelector(`.sch-c button[data-e="${e}"][data-d="3"]`); return b && b.textContent === 'L' && b.classList.contains('man'); }, ids[2]);
+    // buat ulang: libur manual menggantikan libur acak di minggu itu (2–8 Feb), isian manual tetap
+    let oldGrid = await page.$('.sch-grid');
+    await page.click('[data-act=random]');
+    await modalBtn('Buat jadwal').click();
+    await page.waitForFunction((el) => !el.isConnected && document.querySelector('.sch-grid'), oldGrid);
+    const wk = await ev((e) => [2, 3, 4, 5, 6, 7, 8].map((d) => document.querySelector(`.sch-c button[data-e="${e}"][data-d="${d}"]`).textContent).join(''), ids[2]);
+    assert.ok(wk[1] === 'L' && wk.split('L').length - 1 === 1, 'minggu 2–8 hanya libur manual: ' + wk);
+    assert.strictEqual(wk[0], 'P', 'tetap Pagi setiap Senin');
+    // garis batas minggu & judul minggu
+    assert.ok(await page.locator('.sch-grid thead .sch-wk').count() >= 4);
+    assert.ok(await page.locator('.sch-grid thead th.sch-d.wk').count() >= 3);
     await newToast(() => page.click('[data-act=save]'), /disimpan \(versi 1\)/);
     // muat ulang dari database
     await go('dashboard');
@@ -1176,6 +1204,52 @@ async function step(name, fn) {
     assert.ok(await ev(async () => (await NP.db.all('auditLog')).some((l) => l.action === 'schedule.save')));
     const x = await download(() => page.click('.page-head [data-act=xls]'));
     assert.strictEqual(x.name, 'jadwal-masuk-2026-02-klinik.xlsx');
+    const pdf = await download(() => page.click('.page-head [data-act=pdf]'));
+    assert.ok(pdf.name === 'jadwal-masuk-2026-02-klinik.pdf' && pdf.size > 10000, pdf.name + ' ' + pdf.size);
+    // salin ketentuan ke karyawan yang dipilih saja
+    await page.click('[data-tab=people]');
+    await page.waitForSelector('.sch-plist');
+    await page.click(`.sch-p[data-emp="${ids[0]}"] [data-copyrule]`);
+    await page.waitForSelector('.sch-cplist');
+    assert.strictEqual(await page.locator('.sch-cplist [data-cpto]').count(), 3);
+    await page.check(`.sch-cplist [data-cpto="${ids[1]}"]`);
+    const oldP = await page.$('.sch-plist');
+    await modalBtn('Salin ketentuan').click();
+    await page.waitForFunction((el) => !el.isConnected, oldP);
+    const sums = await ev((ids) => ids.map((e) => document.querySelector(`.sch-p[data-emp="${e}"] .sch-sum`).textContent), ids);
+    assert.ok(/libur tiap Minggu/.test(sums[1]) && /prioritas Pagi/.test(sums[1]), sums[1]);
+    assert.ok(!/libur tiap Minggu/.test(sums[2]) && !/libur tiap Minggu/.test(sums[3]), 'karyawan lain tidak berubah');
+    await newToast(() => page.click('[data-act=save]'), /disimpan \(versi 2\)/);
+  });
+  await step('impor jadwal dari Excel: bulan dari sheet, nama dicocokkan / dipilih, shift & kebutuhan dari file, tersimpan', async () => {
+    const XLSX = require(path.join(ROOT, 'vendor', 'xlsx.full.min.js'));
+    const sfx = require('./support/schedule-fixture.js');
+    const file = sfx.writeXlsx(XLSX, path.join(require('os').tmpdir(), 'jadwal-uji.xlsx'), '2026-12');
+    // satu karyawan bernama sama dengan baris pertama file (gelar & tanda baca berbeda)
+    const kid = await ev(async () => (await NP.emp.save(Object.assign(NP.emp.blank(), { name: 'apt. Uji Satu, S.Farm.', phone: '081277770001', unit: 'APT', position: 'Apoteker', department: 'Farmasi', payScheme: 'monthly', baseSalary: 3000000 }))).id);
+    await go('schedule?month=2026-11&unit=ALL&tab=grid');
+    await page.waitForSelector('.sch-bar');
+    const [fc] = await Promise.all([page.waitForEvent('filechooser'), page.click('.page-head [data-act=import]')]);
+    await fc.setFiles(file);
+    await page.waitForSelector('.im-rows');
+    assert.strictEqual(await page.inputValue('#im-month'), '2026-12');
+    assert.strictEqual(await page.inputValue('[data-imap="0"]'), kid, 'nama cocok otomatis');
+    assert.ok(/baru — ditambahkan/.test(await page.locator('.modal-body').innerText()), 'shift M baru');
+    // baris 2 dipilih manual, baris 3 & 4 dilewati
+    const other = await page.locator('[data-imap="1"] option').nth(2).getAttribute('value');
+    await page.selectOption('[data-imap="1"]', other);
+    await page.selectOption('[data-imap="2"]', '');
+    await page.selectOption('[data-imap="3"]', '');
+    await newToast(() => modalBtn('Impor jadwal').click(), /Jadwal diimpor: 2 karyawan, 62 isian/);
+    await page.waitForSelector('.sch-grid');
+    assert.strictEqual(await page.inputValue('#sc-month'), '2026-12');
+    assert.ok(/Belum disimpan/.test(await page.locator('#sc-state').innerText()));
+    await newToast(() => page.click('[data-act=save]'), /disimpan \(versi 1\)/);
+    const r = await ev(async ([kid, other]) => {
+      const s = await NP.sched.get('2026-12', 'ALL');
+      return { emps: s.config.employees, d1: s.assignments[kid][1], m: s.config.shifts.map((x) => x.code), p: s.config.shifts[0].start, w1: s.config.weekly[1], d25: s.config.days[25], man: Object.keys(s.config.manual[other]).length };
+    }, [kid, other]);
+    assert.deepStrictEqual(r, { emps: [kid, other], d1: 'P', m: ['P', 'S', 'M'], p: '08:00', w1: { P: 1, S: 2 }, d25: { need: { S: 1 } }, man: 31 });
   });
   await step('tombol Muat ulang: halaman dimuat ulang, tetap login di halaman yang sama; jadwal belum disimpan → konfirmasi', async () => {
     await go('analysis');
@@ -1203,7 +1277,7 @@ async function step(name, fn) {
     })()]);
     await page.waitForSelector('#view.page-schedule .page-host');
     await page.waitForSelector('.sch-grid');
-    assert.ok(/Tersimpan · versi 1/.test(await page.locator('#sc-state').innerText()), 'perubahan yang belum disimpan dibuang');
+    assert.ok(/Tersimpan · versi 2/.test(await page.locator('#sc-state').innerText()), 'perubahan yang belum disimpan dibuang');
   });
   await step('Data Karyawan: tombol Tambah Dokter & Tambah Bidan mengisi jabatan, unit & skema', async () => {
     await go('employees');

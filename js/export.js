@@ -123,6 +123,7 @@
     }
     y += opt.subtitle ? 10 : 6;
     const sections = opt.sections || [{ head: opt.head, body: opt.body, foot: opt.foot, numericCols: opt.numericCols }];
+    const footed = new Set();
     for (const sec of sections) {
       if (sec.title) {
         doc.setFont('helvetica', 'bold');
@@ -136,7 +137,7 @@
       }
       const colStyles = {};
       (sec.numericCols || []).forEach((i) => (colStyles[i] = { halign: 'right' }));
-      doc.autoTable({
+      doc.autoTable(Object.assign({
         startY: y,
         head: sec.head ? [sec.head] : undefined,
         body: sec.body,
@@ -149,6 +150,10 @@
         columnStyles: colStyles,
         margin: { left: 14, right: 14 },
         didDrawPage: () => {
+          // kaki halaman sekali per halaman (beberapa tabel dapat berada di halaman yang sama)
+          const pg = doc.internal.getNumberOfPages();
+          if (footed.has(pg)) return;
+          footed.add(pg);
           const H = doc.internal.pageSize.getHeight();
           doc.setFontSize(7.5);
           doc.setTextColor(120);
@@ -156,7 +161,7 @@
           doc.text('Hal. ' + doc.internal.getNumberOfPages(), W - 14, H - 7, { align: 'right' });
           doc.setTextColor(0);
         }
-      });
+      }, sec.tableOpts || {})); // tableOpts: gaya/kolom khusus per bagian (mis. warna sel jadwal)
       y = doc.lastAutoTable.finalY + 8;
     }
     if (opt.signatures) {
