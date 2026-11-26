@@ -763,6 +763,37 @@ console.log('Jadwal masuk');
     const g2 = S.generate(Object.assign(mk({}), { assignments: { A: { 3: 'L' } }, config: Object.assign(mk({}).config, { manual: { A: { 3: true } } }) }), { seed: 8, manualOffWeek: false });
     assert.ok([2, 4, 5, 6, 7, 8].some((d) => g2.assignments.A[d] === 'L'), 'tanpa opsi: libur acak tetap ada');
   });
+  test('impor Excel jadwal: bulan dari nama sheet, shift & jam dari Keterangan, kebutuhan dari baris Jumlah', () => {
+    const fx = require('./support/schedule-fixture.js').build('2026-12');
+    const p = S.parseSheets(fx.sheets);
+    assert.strictEqual(p.period, '2026-12');
+    assert.deepStrictEqual(p.shifts.map((x) => [x.code, x.start, x.end]), [['P', '08:00', '15:00'], ['S', '14:00', '21:00'], ['M', '21:00', '08:00']]);
+    assert.deepStrictEqual(p.rows.map((r) => [r.name, Object.keys(r.cells).length]), [['apt. Uji Satu., S.Farm', 31], ["Bd. Sal'sa Dua, A.Md.Keb.", 31], ['Tn. Orang Tiga, S.Pd.', 31], ['Nama Tidak Dikenal', 31]]);
+    assert.deepStrictEqual(p.codes.sort(), ['M', 'P', 'S']);
+    assert.strictEqual(p.needs.S[25], 1);
+    assert.deepStrictEqual([S.periodOf('Jadwal Desember 2026'), S.periodOf('12/2026'), S.timeOf(0.5), S.timeOf('8.30')], ['2026-12', '2026-12', '12:00', '08:30']);
+    const emps = [{ id: 'K1', name: 'apt. Uji Satu, S.Farm.' }, { id: 'K2', name: 'Salsa Dua' }, { id: 'K3', name: 'Orang Tiga' }, { id: 'K4', name: 'Uji Lain' }];
+    assert.deepStrictEqual(p.rows.map((r) => (S.matchEmployee(r.name, emps) || {}).id || null), ['K1', 'K2', 'K3', null]);
+    const s = S.blank('2026-12', 'ALL');
+    s.config.employees = ['K9'];
+    s.assignments = { K9: { 1: 'P' } };
+    const res = S.applyImport(s, p, { 0: 'K1', 1: 'K2', 2: 'K3' }, {});
+    assert.deepStrictEqual([res.employees, res.cells, res.addedShifts, res.updatedShifts], [3, 93, ['M'], ['P']]);
+    assert.deepStrictEqual(s.config.employees, ['K9', 'K1', 'K2', 'K3']);
+    assert.deepStrictEqual(s.assignments.K9, { 1: 'P' }, 'karyawan lain tidak berubah');
+    assert.strictEqual(s.assignments.K3[10], 'M');
+    assert.ok(s.config.manual.K1[1], 'ditandai manual');
+    assert.deepStrictEqual(s.config.rules.K1, { maxWeek: 0, maxRun: 0 }, 'tanpa batas bawaan');
+    assert.deepStrictEqual([s.config.weekly[1], s.config.days[25]], [{ P: 1, S: 2 }, { need: { S: 1 } }]);
+    assert.deepStrictEqual(S.validate(s), []);
+    assert.strictEqual(S.check(s).issues, 0);
+    // ekspor Excel aplikasi → impor kembali menghasilkan isian yang sama
+    const empMap = new Map([['K9', { name: 'Karyawan Sembilan', position: 'Kasir' }], ['K1', { name: 'apt. Uji Satu, S.Farm.' }], ['K2', { name: 'Salsa Dua' }], ['K3', { name: 'Orang Tiga' }]]);
+    const back = S.parseSheets(S.toSheets(s, empMap));
+    assert.strictEqual(back.period, '2026-12');
+    assert.deepStrictEqual(back.rows.map((r) => r.cells), s.config.employees.map((e) => s.assignments[e]));
+    assert.strictEqual(back.needs.S[25], 1);
+  });
   test('validasi sebelum simpan: kode shift, tanggal di luar bulan, karyawan di luar jadwal', () => {
     const s = mk();
     assert.deepStrictEqual(S.validate(s), []);

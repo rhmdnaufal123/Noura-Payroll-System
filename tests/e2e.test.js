@@ -1221,6 +1221,36 @@ async function step(name, fn) {
     assert.ok(!/libur tiap Minggu/.test(sums[2]) && !/libur tiap Minggu/.test(sums[3]), 'karyawan lain tidak berubah');
     await newToast(() => page.click('[data-act=save]'), /disimpan \(versi 2\)/);
   });
+  await step('impor jadwal dari Excel: bulan dari sheet, nama dicocokkan / dipilih, shift & kebutuhan dari file, tersimpan', async () => {
+    const XLSX = require(path.join(ROOT, 'vendor', 'xlsx.full.min.js'));
+    const sfx = require('./support/schedule-fixture.js');
+    const file = sfx.writeXlsx(XLSX, path.join(require('os').tmpdir(), 'jadwal-uji.xlsx'), '2026-12');
+    // satu karyawan bernama sama dengan baris pertama file (gelar & tanda baca berbeda)
+    const kid = await ev(async () => (await NP.emp.save(Object.assign(NP.emp.blank(), { name: 'apt. Uji Satu, S.Farm.', phone: '081277770001', unit: 'APT', position: 'Apoteker', department: 'Farmasi', payScheme: 'monthly', baseSalary: 3000000 }))).id);
+    await go('schedule?month=2026-11&unit=ALL&tab=grid');
+    await page.waitForSelector('.sch-bar');
+    const [fc] = await Promise.all([page.waitForEvent('filechooser'), page.click('.page-head [data-act=import]')]);
+    await fc.setFiles(file);
+    await page.waitForSelector('.im-rows');
+    assert.strictEqual(await page.inputValue('#im-month'), '2026-12');
+    assert.strictEqual(await page.inputValue('[data-imap="0"]'), kid, 'nama cocok otomatis');
+    assert.ok(/baru — ditambahkan/.test(await page.locator('.modal-body').innerText()), 'shift M baru');
+    // baris 2 dipilih manual, baris 3 & 4 dilewati
+    const other = await page.locator('[data-imap="1"] option').nth(2).getAttribute('value');
+    await page.selectOption('[data-imap="1"]', other);
+    await page.selectOption('[data-imap="2"]', '');
+    await page.selectOption('[data-imap="3"]', '');
+    await newToast(() => modalBtn('Impor jadwal').click(), /Jadwal diimpor: 2 karyawan, 62 isian/);
+    await page.waitForSelector('.sch-grid');
+    assert.strictEqual(await page.inputValue('#sc-month'), '2026-12');
+    assert.ok(/Belum disimpan/.test(await page.locator('#sc-state').innerText()));
+    await newToast(() => page.click('[data-act=save]'), /disimpan \(versi 1\)/);
+    const r = await ev(async ([kid, other]) => {
+      const s = await NP.sched.get('2026-12', 'ALL');
+      return { emps: s.config.employees, d1: s.assignments[kid][1], m: s.config.shifts.map((x) => x.code), p: s.config.shifts[0].start, w1: s.config.weekly[1], d25: s.config.days[25], man: Object.keys(s.config.manual[other]).length };
+    }, [kid, other]);
+    assert.deepStrictEqual(r, { emps: [kid, other], d1: 'P', m: ['P', 'S', 'M'], p: '08:00', w1: { P: 1, S: 2 }, d25: { need: { S: 1 } }, man: 31 });
+  });
   await step('tombol Muat ulang: halaman dimuat ulang, tetap login di halaman yang sama; jadwal belum disimpan → konfirmasi', async () => {
     await go('analysis');
     await ev(() => (window.__marker = 1));

@@ -528,10 +528,204 @@
     return { id: idOf(s.period, s.unit), period: s.period, unit: s.unit, title: s.title || '', config, assignments, version: s.version };
   }
 
+  /* ------------------------------ Impor Excel ------------------------------ */
+  const MONTHS = { jan: 1, feb: 2, mar: 3, apr: 4, mei: 5, may: 5, jun: 6, jul: 7, agu: 8, agt: 8, aug: 8, sep: 9, okt: 10, oct: 10, nov: 11, des: 12, dec: 12 };
+  const cellStr = (v) => (v === null || v === undefined ? '' : String(v).trim());
+  /** Jam dari Excel: "08:00", "8.00", atau pecahan hari (0.3333) → "HH:MM". */
+  function timeOf(v) {
+    if (typeof v === 'number' && v >= 0 && v < 1) {
+      const m = Math.round(v * 1440);
+      return String(Math.floor(m / 60) % 24).padStart(2, '0') + ':' + String(m % 60).padStart(2, '0');
+    }
+    const m = /^(\d{1,2})[:.](\d{2})/.exec(cellStr(v));
+    return m && +m[1] < 24 && +m[2] < 60 ? m[1].padStart(2, '0') + ':' + m[2] : '';
+  }
+  /** Periode dari nama sheet / judul: "Jadwal 2026-12", "Desember 2026", "12/2026". */
+  function periodOf(text) {
+    const t = cellStr(text).toLowerCase();
+    let m = /(20\d{2})[-/ ](0?[1-9]|1[0-2])\b/.exec(t);
+    if (m) return m[1] + '-' + m[2].padStart(2, '0');
+    m = /\b(0?[1-9]|1[0-2])[-/ ](20\d{2})/.exec(t);
+    if (m) return m[2] + '-' + m[1].padStart(2, '0');
+    m = /(jan|feb|mar|apr|mei|may|jun|jul|agu|agt|aug|sep|okt|oct|nov|des|dec)[a-z]*\.?\s+(20\d{2})/.exec(t);
+    if (m) return m[2] + '-' + String(MONTHS[m[1]]).padStart(2, '0');
+    return null;
+  }
+  /**
+   * Baca jadwal dari lembar kerja (format ekspor Excel aplikasi ini, atau tabel serupa):
+   * baris judul berisi kolom "Nama" lalu kolom tanggal ("1", "1 Sel", "01"), baris berikutnya
+   * nama karyawan + kode shift per tanggal. Sheet "Keterangan" (Kode, Nama shift, Mulai, Selesai)
+   * dipakai untuk jam shift. Baris "Jumlah …" dan kolom ringkasan diabaikan.
+   * @param sheets [{ name, aoa }]
+   * @returns { period, shifts:[{code,name,start,end}], rows:[{name, position, cells:{d:code}, unknown:[]}], codes:[], warnings:[] }
+   */
+  function parseSheets(sheets) {
+    const out = { period: null, shifts: [], rows: [], codes: [], needs: {}, warnings: [], sheet: null };
+    const legend = sheets.find((x) => /keterangan|shift|legend/i.test(x.name));
+    if (legend) {
+      const hi = legend.aoa.findIndex((r) => (r || []).some((c) => /^kode$/i.test(cellStr(c))));
+      if (hi >= 0) {
+        const h = legend.aoa[hi].map((c) => cellStr(c).toLowerCase());
+        const col = (re) => h.findIndex((c) => re.test(c));
+        const [ck, cn, cs, ce] = [col(/^kode/), col(/nama/), col(/mulai|masuk|start/), col(/selesai|pulang|end/)];
+        for (const r of legend.aoa.slice(hi + 1)) {
+          const code = cellStr((r || [])[ck]).toUpperCase();
+          if (!/^[A-Z0-9]{1,3}$/.test(code) || code === OFF) continue;
+          out.shifts.push({ code, name: cellStr(r[cn]) || code, start: timeOf(r[cs]), end: timeOf(r[ce]) });
+        }
+      }
+    }
+    for (const sh of sheets) {
+      if (sh === legend) continue;
+      const aoa = sh.aoa || [];
+      const hi = aoa.findIndex((r) => (r || []).some((c) => /^(nama|karyawan|nama karyawan)$/i.test(cellStr(c))));
+      if (hi < 0) continue;
+      const head = aoa[hi];
+      const nameCol = head.findIndex((c) => /^(nama|karyawan|nama karyawan)$/i.test(cellStr(c)));
+      const posCol = head.findIndex((c) => /^(jabatan|posisi)$/i.test(cellStr(c)));
+      const dayCols = [];
+      head.forEach((c, i) => {
+        if (i === nameCol || i === posCol) return;
+        const m = /^(\d{1,2})(?:\s*[a-z]{2,6}\.?)?$/i.exec(cellStr(typeof c === 'number' ? Math.round(c) : c));
+        if (m && +m[1] >= 1 && +m[1] <= 31) dayCols.push({ i, d: +m[1], wd: cellStr(c).replace(/^\d+\s*/, '').slice(0, 3).toLowerCase() });
+      });
+      if (dayCols.length < 7) continue;
+      out.sheet = sh.name;
+      out.period = periodOf(sh.name) || aoa.slice(0, hi).map((r) => periodOf((r || []).join(' '))).find(Boolean) || null;
+      out.dayCols = dayCols;
+      const seen = new Set();
+      for (const r of aoa.slice(hi + 1)) {
+        const name = cellStr((r || [])[nameCol]);
+        // baris "Jumlah P" berisi terisi/ideal per tanggal → kebutuhan ideal
+        const jm = /^jumlah\s+([A-Z0-9]{1,3})$/i.exec(name);
+        if (jm) {
+          const code = jm[1].toUpperCase();
+          for (const { i, d } of dayCols) {
+            const m = /^\s*\d+\s*\/\s*(\d+)\s*$/.exec(cellStr(r[i]));
+            if (m) (out.needs[code] = out.needs[code] || {})[d] = +m[1];
+          }
+          continue;
+        }
+        if (!name || /^(jumlah|total|keterangan|kode)\b/i.test(name)) continue;
+        const cells = {};
+        const unknown = [];
+        for (const { i, d } of dayCols) {
+          const v = cellStr(r[i]).toUpperCase();
+          if (!v || v === '-') continue;
+          if (!/^[A-Z0-9]{1,3}$/.test(v)) {
+            unknown.push(d + ': ' + v);
+            continue;
+          }
+          cells[d] = v;
+          if (v !== OFF) seen.add(v);
+        }
+        if (!Object.keys(cells).length && !unknown.length) continue;
+        out.rows.push({ name, position: posCol >= 0 ? cellStr(r[posCol]) : '', cells, unknown });
+      }
+      out.codes = [...seen];
+      break;
+    }
+    if (!out.rows.length) out.warnings.push('Tidak menemukan tabel jadwal (baris judul dengan kolom "Nama" dan kolom tanggal 1–31).');
+    return out;
+  }
+  function parseWorkbook(wb, X) {
+    return parseSheets(wb.SheetNames.map((n) => ({ name: n, aoa: X.utils.sheet_to_json(wb.Sheets[n], { header: 1, raw: true, defval: null }) })));
+  }
+
+  // gelar & sapaan diabaikan saat mencocokkan nama
+  const TITLES = new Set(['apt', 'dr', 'drg', 'bd', 'ns', 'ny', 'tn', 'sdr', 'bpk', 'ibu', 's', 'farm', 'pd', 'e', 'kep', 'keb', 'md', 'a', 'amd', 'm', 'kes', 'si', 'st', 'se', 'sh', 'ked', 'sp', 'mm', 'mh', 'mkes', 'skep', 'sfarm', 'spd', 'ak', 'kom', 'sos', 'gz', 'tr', 'ftr', 'apt.']);
+  const nameTokens = (n) => String(n || '').toLowerCase().replace(/['’`]/g, '').split(/[^a-z0-9]+/).filter((t) => t && !TITLES.has(t));
+  /** Cocokkan nama di file dengan karyawan: semua kata inti sama (abaikan gelar & tanda baca). */
+  function matchEmployee(name, employees) {
+    const a = nameTokens(name);
+    if (!a.length) return null;
+    let best = null;
+    for (const e of employees) {
+      const b = nameTokens(e.name);
+      if (!b.length) continue;
+      const inter = a.filter((t) => b.includes(t)).length;
+      const score = inter / Math.max(a.length, b.length);
+      if (inter && (!best || score > best.score)) best = { e, score };
+    }
+    return best && best.score >= 0.6 ? best.e : null;
+  }
+
+  /**
+   * Terapkan hasil impor ke jadwal s (diubah langsung).
+   * @param map  { [indeks baris]: id karyawan } — baris tanpa karyawan dilewati
+   * @param opt  { manual (bawaan true): tandai isian sebagai manual, updateTimes (bawaan true),
+   *               needs (bawaan true): pakai kebutuhan petugas dari baris "Jumlah …" di file }
+   * Karyawan yang baru masuk jadwal lewat impor tidak diberi batas bawaan (maks. 6 hari per minggu
+   * & berturut-turut) agar jadwal dari file tidak langsung ditandai melanggar.
+   */
+  function applyImport(s, parsed, map, opt) {
+    opt = opt || {};
+    const N = daysIn(s.period);
+    const res = { employees: 0, cells: 0, addedShifts: [], updatedShifts: [], needs: false };
+    for (const code of parsed.codes) {
+      const def = parsed.shifts.find((x) => x.code === code);
+      const cur = shiftOf(s, code);
+      if (!cur) {
+        s.config.shifts.push({ code, name: (def && def.name) || 'Shift ' + code, start: (def && def.start) || '08:00', end: (def && def.end) || '15:00', color: PALETTE[s.config.shifts.length % PALETTE.length] });
+        res.addedShifts.push(code);
+      } else if (def && opt.updateTimes !== false && def.start && def.end && (def.start !== cur.start || def.end !== cur.end || (def.name && def.name !== cur.name))) {
+        Object.assign(cur, { name: def.name || cur.name, start: def.start, end: def.end });
+        res.updatedShifts.push(code);
+      }
+    }
+    if (opt.needs !== false && Object.keys(parsed.needs || {}).length) {
+      // pola mingguan = nilai terbanyak per hari; tanggal yang berbeda menjadi custom per tanggal
+      const weekly = {};
+      for (let w = 0; w < 7; w++) weekly[w] = Object.assign({}, s.config.weekly[w] || {});
+      for (const [code, byDay] of Object.entries(parsed.needs)) {
+        for (let w = 0; w < 7; w++) {
+          const freq = new Map();
+          for (const [d, n] of Object.entries(byDay)) if (+d <= N && weekday(s.period, +d) === w) freq.set(n, (freq.get(n) || 0) + 1);
+          if (freq.size) weekly[w][code] = [...freq.entries()].sort((a, b) => b[1] - a[1] || a[0] - b[0])[0][0];
+        }
+      }
+      s.config.weekly = weekly;
+      for (const [code, byDay] of Object.entries(parsed.needs)) {
+        for (const [d, n] of Object.entries(byDay)) {
+          if (+d > N) continue;
+          const o = s.config.days[d];
+          if (o && o.need) delete o.need[code];
+          if (n !== weekly[weekday(s.period, +d)][code]) {
+            const x = s.config.days[d] || { need: {} };
+            x.need = Object.assign({}, x.need, { [code]: n });
+            s.config.days[d] = x;
+          } else if (o && !o.closed && !Object.keys(o.need || {}).length) delete s.config.days[d];
+        }
+      }
+      res.needs = true;
+    }
+    parsed.rows.forEach((row, i) => {
+      const e = map[i];
+      if (!e) return;
+      if (!s.config.employees.includes(e)) {
+        s.config.employees.push(e);
+        if (!s.config.rules[e]) s.config.rules[e] = { maxWeek: 0, maxRun: 0 };
+      }
+      const cells = {};
+      const man = {};
+      for (const [d, v] of Object.entries(row.cells)) {
+        if (+d > N) continue;
+        cells[d] = v;
+        man[d] = true;
+        res.cells++;
+      }
+      s.assignments[e] = cells;
+      if (opt.manual !== false) s.config.manual[e] = man;
+      else delete s.config.manual[e];
+      res.employees++;
+    });
+    return res;
+  }
+
   /* ---------------------------- Penyimpanan ---------------------------- */
   const sched = {
     OFF, WEEKDAYS, WD3, UNITS, DEFAULT_SHIFTS, DEFAULT_RULE, PALETTE,
-    daysIn, weekday, weeksOf, idOf, hours, parseDays, fmtDays, blank, normalize, ruleOf, describeRule, needOf, quotaFor, generate, check, validate, payload, allowed,
+    daysIn, weekday, weeksOf, idOf, hours, parseSheets, parseWorkbook, matchEmployee, applyImport, periodOf, timeOf, parseDays, fmtDays, blank, normalize, ruleOf, describeRule, needOf, quotaFor, generate, check, validate, payload, allowed,
 
     async get(period, unit) {
       const rec = await NP.db.get('schedules', idOf(period, unit));
@@ -658,7 +852,7 @@
       }
       aoa.push([]);
       for (const sh of s.config.shifts) {
-        const row = ['Jumlah ' + sh.code, 'butuh / terisi'];
+        const row = ['Jumlah ' + sh.code, 'terisi / ideal'];
         for (let d = 1; d <= N; d++) {
           const b = C.byDay[d];
           row.push(b.closed ? 'tutup' : (b.count[sh.code] || 0) + '/' + b.need[sh.code]);
@@ -702,6 +896,7 @@
       <div class="page-head">
         <div><h2>Jadwal Masuk</h2><p class="muted">Susun jadwal kerja bulanan: atur shift dan kebutuhan petugas per hari, pilih karyawan beserta ketentuannya, lalu buat jadwal otomatis (merata atau acak) dan sesuaikan per sel.</p></div>
         <div class="actions">
+          ${canEdit ? `<button type="button" class="btn btn-ghost" data-act="import">${ui.icon('upload')}<span>Impor Excel</span></button>` : ''}
           <button type="button" class="btn btn-ghost" data-act="pdf">${ui.icon('pdf')}<span>PDF</span></button>
           <button type="button" class="btn btn-ghost" data-act="xls">${ui.icon('excel')}<span>Excel</span></button>
           <button type="button" class="btn btn-ghost" data-act="print">${ui.icon('print')}<span>Cetak</span></button>
@@ -1229,6 +1424,103 @@
       if (t.id === 'sc-offweek') st.manualOffWeek = t.checked;
     });
 
+    /* ---------------------------- Impor Excel ---------------------------- */
+    async function importFlow() {
+      const f = await ui.pickFile('.xlsx,.xls,.csv');
+      if (!f) return;
+      if (!root.XLSX) return ui.toast('Pustaka Excel (SheetJS) tidak tersedia.', 'error');
+      let parsed;
+      try {
+        parsed = parseWorkbook(XLSX.read(await ui.readFile(f, 'buffer'), { type: 'array' }), XLSX);
+      } catch (e) {
+        return ui.toast('File tidak dapat dibaca: ' + e.message, 'error');
+      }
+      if (!parsed.rows.length) return ui.toast(parsed.warnings[0] || 'Tabel jadwal tidak ditemukan.', 'error');
+      const staff = employees.slice().sort((x, y) => x.name.localeCompare(y.name, 'id'));
+      const auto = parsed.rows.map((r) => (matchEmployee(r.name, staff) || {}).id || '');
+      const period0 = parsed.period || st.period;
+      const wdCheck = (period) => {
+        let bad = 0;
+        for (const c of parsed.dayCols || []) if (c.wd && c.d <= daysIn(period) && WD3[weekday(period, c.d)].toLowerCase() !== c.wd) bad++;
+        return bad;
+      };
+      const shiftRows = parsed.codes.map((code) => {
+        const def = parsed.shifts.find((x) => x.code === code) || {};
+        const cur = shiftOf(drafts.get(idOf(period0, st.unit)) || s, code);
+        const st2 = !cur ? '<span class="flag flag-dup">baru — ditambahkan</span>' : def.start && (def.start !== cur.start || def.end !== cur.end) ? `<span class="flag flag-low">jam berbeda (sekarang ${cur.start}–${cur.end})</span>` : '<span class="flag flag-done">sama</span>';
+        return `<tr><td><b>${u.esc(code)}</b></td><td>${u.esc(def.name || (cur && cur.name) || '-')}</td><td>${def.start ? def.start + '–' + def.end : '<span class="muted">tidak ada di file</span>'}</td><td>${st2}</td></tr>`;
+      }).join('');
+      const m = ui.modal({
+        title: 'Impor jadwal dari Excel',
+        size: 'lg',
+        body: `<p class="muted small">${ui.icon('excel')} <b>${u.esc(f.name)}</b>${parsed.sheet ? ' · sheet ' + u.esc(parsed.sheet) : ''} · ${parsed.rows.length} baris karyawan</p>
+          <div class="grid-3">
+            <label class="field"><span>Bulan jadwal</span><input type="month" id="im-month" value="${period0}"><small class="muted">${parsed.period ? 'Terbaca dari nama sheet.' : 'Bulan tidak terbaca dari file — periksa kembali.'}</small></label>
+            <div class="field"><span>Unit jadwal tujuan</span><b>${u.esc(UNITS[st.unit])}</b><small class="muted">Ubah unit di halaman bila perlu.</small></div>
+          </div>
+          <div id="im-wd"></div>
+          ${parsed.codes.length ? `<h4>Shift di file</h4><div class="table-wrap"><table class="tbl"><thead><tr><th>Kode</th><th>Nama</th><th>Jam di file</th><th>Status</th></tr></thead><tbody>${shiftRows}</tbody></table></div>` : ''}
+          <h4>Karyawan</h4>
+          <p class="muted small">Nama di file dicocokkan otomatis dengan Data Karyawan (gelar & tanda baca diabaikan). Periksa dan ubah bila perlu; pilih <i>— lewati —</i> untuk tidak mengimpor baris tersebut.</p>
+          <div class="table-wrap table-cards"><table class="tbl im-rows"><thead><tr><th>Nama di file</th><th>Karyawan</th><th class="ta-right">Masuk</th><th class="ta-right">Libur</th><th>Catatan</th></tr></thead><tbody>
+            ${parsed.rows.map((r, i) => {
+              const v = Object.values(r.cells);
+              return `<tr data-ir="${i}"><td data-label="Nama di file"><b>${u.esc(r.name)}</b><small class="block muted">${u.esc(r.position || '')}</small></td>
+                <td data-label="Karyawan"><select data-imap="${i}">${ui.options(staff.map((e) => [e.id, e.name + (e.position ? ' · ' + e.position : '')]), auto[i], '— lewati —')}</select>${auto[i] ? '' : '<small class="block txt-warn">Tidak ditemukan otomatis</small>'}</td>
+                <td data-label="Masuk" class="ta-right">${v.filter((x) => x !== OFF).length}</td><td data-label="Libur" class="ta-right">${v.filter((x) => x === OFF).length}</td>
+                <td data-label="Catatan">${r.unknown.length ? `<span class="flag flag-low">diabaikan: ${u.esc(r.unknown.slice(0, 3).join(', '))}</span>` : '<span class="muted">—</span>'}</td></tr>`;
+            }).join('')}
+          </tbody></table></div>
+          <label class="check"><input type="checkbox" id="im-manual" checked><span>Tandai sebagai isian manual (dipertahankan saat <b>Buat jadwal acak</b>)</span></label>
+          <label class="check"><input type="checkbox" id="im-times" checked><span>Perbarui nama & jam shift dari file</span></label>
+          ${Object.keys(parsed.needs).length ? `<label class="check"><input type="checkbox" id="im-needs" checked><span>Pakai kebutuhan petugas per hari dari file (baris ${Object.keys(parsed.needs).map((c) => '"Jumlah ' + u.esc(c) + '"').join(', ')})</span></label>` : ''}
+          <p class="muted small">Jadwal karyawan yang diimpor pada bulan tersebut diganti dengan isi file; karyawan lain tidak berubah. Perubahan baru tersimpan setelah Anda menekan <b>Simpan jadwal</b>.</p>
+          <div class="form-error" hidden></div>`,
+        actions: [
+          { label: 'Batal', cls: 'btn-ghost', onClick: (mm) => mm.close() },
+          {
+            label: 'Impor jadwal', cls: 'btn-primary', icon: 'upload', onClick: async (mm) => {
+              const err = (msg) => {
+                const e = mm.el.querySelector('.form-error');
+                e.hidden = false;
+                e.textContent = msg;
+              };
+              const month = mm.el.querySelector('#im-month').value;
+              if (!/^\d{4}-\d{2}$/.test(month)) return err('Pilih bulan jadwal.');
+              const map = {};
+              const used = new Map();
+              mm.el.querySelectorAll('[data-imap]').forEach((x) => {
+                if (!x.value) return;
+                map[x.dataset.imap] = x.value;
+                used.set(x.value, (used.get(x.value) || 0) + 1);
+              });
+              if (!Object.keys(map).length) return err('Pilih minimal satu karyawan untuk diimpor.');
+              const dup = [...used.entries()].filter(([, n]) => n > 1).map(([id]) => (empMap.get(id) || {}).name || id);
+              if (dup.length) return err('Satu karyawan dipilih untuk lebih dari satu baris: ' + dup.join(', ') + '.');
+              const key2 = idOf(month, st.unit);
+              let target = drafts.get(key2);
+              if (!target || !target.dirty) target = (await sched.get(month, st.unit)) || blank(month, st.unit);
+              const res = applyImport(target, parsed, map, { manual: mm.el.querySelector('#im-manual').checked, updateTimes: mm.el.querySelector('#im-times').checked, needs: !!(mm.el.querySelector('#im-needs') || {}).checked });
+              target.dirty = true;
+              drafts.set(key2, target);
+              st.period = month;
+              st.tab = 'grid';
+              mm.close();
+              ui.toast('Jadwal diimpor: ' + res.employees + ' karyawan, ' + res.cells + ' isian' + (res.addedShifts.length ? ', shift baru ' + res.addedShifts.join(', ') : '') + (res.updatedShifts.length ? ', jam shift diperbarui ' + res.updatedShifts.join(', ') : '') + (res.needs ? ', kebutuhan petugas dari file' : '') + '. Tekan Simpan jadwal untuk menyimpan.');
+              render(view, {});
+            }
+          }
+        ]
+      });
+      const wdNote = () => {
+        const p = m.el.querySelector('#im-month').value;
+        const bad = /^\d{4}-\d{2}$/.test(p) ? wdCheck(p) : 0;
+        m.el.querySelector('#im-wd').innerHTML = bad > 2 ? `<div class="alert alert-warning">${ui.icon('warn')}<div>Nama hari pada kolom tanggal di file tidak cocok dengan ${u.esc(u.periodLabel(p))} (${bad} tanggal). Pastikan bulan jadwal sudah benar.</div></div>` : '';
+      };
+      m.el.querySelector('#im-month').addEventListener('change', wdNote);
+      wdNote();
+    }
+
     /* ----------------------------- Toolbar ----------------------------- */
     // pindah bulan/unit: isian yang belum disimpan tetap tersimpan sementara di memori
     ui.$('#sc-month', view).onchange = async (ev) => {
@@ -1247,6 +1539,7 @@
         if (!s.config.employees.length) return ui.toast('Jadwal masih kosong.', 'error');
         NP.exp.excel(sched.toSheets(s, empMap), 'jadwal-masuk-' + s.period + '-' + s.unit.toLowerCase() + '.xlsx');
       }
+      if (a.dataset.act === 'import') importFlow();
       if (a.dataset.act === 'pdf') {
         if (!s.config.employees.length) return ui.toast('Jadwal masih kosong.', 'error');
         ui.busy('Membuat PDF jadwal…', () => sched.pdf(s, empMap)).catch((e) => ui.toast(e.message, 'error'));
