@@ -154,6 +154,15 @@
 
   // Senin sebagai awal minggu
   const weekStart = (period, d) => d - ((weekday(period, d) + 6) % 7);
+  /** Minggu dalam bulan (Senin–Minggu, terpotong di awal/akhir bulan): [{ no, from, to }] */
+  function weeksOf(period) {
+    const N = daysIn(period);
+    const out = [];
+    for (let ws = weekStart(period, 1); ws <= N; ws += 7) out.push({ no: out.length + 1, from: Math.max(1, ws), to: Math.min(N, ws + 6) });
+    return out;
+  }
+  /** Tanggal d adalah awal minggu (Senin) selain tanggal 1 → diberi garis batas minggu. */
+  const weekEdge = (period, d) => d > 1 && weekday(period, d) === 1;
   /** Target pembagian shift untuk minggu yang memuat tanggal d (minggu terpotong awal/akhir bulan dihitung proporsional). */
   function quotaFor(s, r, d) {
     const a = Math.max(1, weekStart(s.period, d));
@@ -223,7 +232,9 @@
    *  5. pada hari ada yang libur, karyawan bertanda "prioritas" dipindah ke shift prioritasnya.
    * Urutan calon: yang masih kurang hari masuk (batas libur) → kekurangan pembagian shift minggu itu
    * → paling sedikit masuk (mode Merata) → acak. Semua ketentuan karyawan tetap dipatuhi.
-   * @param opt { seed, mode: 'fair' | 'random', keepManual (bawaan true) }
+   * @param opt { seed, mode: 'fair' | 'random', keepManual (bawaan true),
+   *              manualOffWeek (bawaan true): minggu yang sudah berisi libur manual ("L") tidak diberi
+   *              libur acak lagi — karyawan dijadwalkan masuk pada hari lain di minggu itu }
    * @returns { assignments, warnings: [{ day, code, missing }] }  — missing = kurang dari MINIMAL
    */
   function generate(s, opt) {
@@ -249,6 +260,11 @@
       const r = rules.get(e);
       return day[d].closed || r.offDays.includes(weekday(s.period, d)) || r.unavailable.includes(d);
     };
+    // minggu (Senin–Minggu) yang sudah berisi libur manual karyawan → tanpa libur acak tambahan
+    const wkOf = (d) => weekStart(s.period, d);
+    const offWeek = new Map(emps.map((e) => [e, new Set()]));
+    if (keep && opt.manualOffWeek !== false) for (const e of emps) for (const d of Object.keys(asg[e])) if (asg[e][d] === OFF && isManual(e, d)) offWeek.get(e).add(wkOf(+d));
+    const inOffWeek = (e, d) => offWeek.get(e).has(wkOf(d));
     // hari yang sudah pasti ada karyawan libur (libur tetap, tidak bisa, isian manual "L")
     const someoneOff = (d) => !day[d].closed && emps.some((e) => asg[e][d] === OFF || (!asg[e][d] && unable(e, d)));
     // 0. shift tetap per hari (mis. selalu Pagi setiap Senin)
@@ -281,7 +297,7 @@
     const fair = opt.mode !== 'random';
     const pick = (d, c, list) => {
       const off = someoneOff(d);
-      const key = (e) => [off && rules.get(e).backup === c ? 0 : 1, -Math.max(0, needWork(e)), -Math.max(0, quotaLeft(e, d, c)), fair ? works(e) : 0, fair ? shiftN(e, c) : 0, tie.get(e) + (fair ? 0 : rnd())];
+      const key = (e) => [off && rules.get(e).backup === c ? 0 : 1, inOffWeek(e, d) ? 0 : 1, -Math.max(0, needWork(e)), -Math.max(0, quotaLeft(e, d, c)), fair ? works(e) : 0, fair ? shiftN(e, c) : 0, tie.get(e) + (fair ? 0 : rnd())];
       const k = new Map(list.map((e) => [e, key(e)]));
       return list.sort((a, b) => {
         const ka = k.get(a);
@@ -344,6 +360,16 @@
         }
         if (!best) break;
         asg[e][best.d] = best.c;
+      }
+    }
+    // 4b. minggu dengan libur manual: hari lain di minggu itu tetap masuk (shift yang paling dibutuhkan)
+    for (const e of emps) {
+      for (let d = 1; d <= N; d++) {
+        if (asg[e][d] || !inOffWeek(e, d) || unable(e, d)) continue;
+        const opts = s.config.shifts.filter((sh) => can(e, d, sh.code));
+        if (!opts.length) continue;
+        opts.sort((a, b) => Math.max(0, quotaLeft(e, d, b.code)) - Math.max(0, quotaLeft(e, d, a.code)) || count(d, a.code) / Math.max(1, day[d].need[a.code]) - count(d, b.code) / Math.max(1, day[d].need[b.code]) || dt[d] - 0.5);
+        asg[e][d] = opts[0].code;
       }
     }
     for (let d = 1; d <= N; d++) for (const e of emps) if (!asg[e][d]) asg[e][d] = OFF;
@@ -505,7 +531,7 @@
   /* ---------------------------- Penyimpanan ---------------------------- */
   const sched = {
     OFF, WEEKDAYS, WD3, UNITS, DEFAULT_SHIFTS, DEFAULT_RULE, PALETTE,
-    daysIn, weekday, idOf, hours, parseDays, fmtDays, blank, normalize, ruleOf, describeRule, needOf, quotaFor, generate, check, validate, payload, allowed,
+    daysIn, weekday, weeksOf, idOf, hours, parseDays, fmtDays, blank, normalize, ruleOf, describeRule, needOf, quotaFor, generate, check, validate, payload, allowed,
 
     async get(period, unit) {
       const rec = await NP.db.get('schedules', idOf(period, unit));
@@ -555,6 +581,8 @@
       const sundayCol = (i) => i >= 1 && i <= N && weekday(s.period, i) === 0;
       const colorCells = (data) => {
         const i = data.column.index;
+        if (i >= 1 && i <= N && weekEdge(s.period, i)) data.cell.styles.lineWidth = Object.assign({ top: 0.1, right: 0.1, bottom: data.section === 'body' ? 0.35 : 0.1 }, { left: 0.7 });
+        else if (data.section === 'body') data.cell.styles.lineWidth = { top: 0.1, right: 0.1, left: 0.1, bottom: 0.35 };
         if (data.section === 'head' && sundayCol(i)) data.cell.styles.textColor = [254, 202, 202];
         if (data.section !== 'body' || i < 1 || i > N) return;
         const v = data.cell.raw;
@@ -566,7 +594,7 @@
         } else if (v === OFF) data.cell.styles.textColor = [148, 163, 184];
         else if (typeof v === 'string' && v.includes('/') && data.row.raw && data.row.raw.short && data.row.raw.short[i]) data.cell.styles.textColor = [220, 38, 38];
       };
-      const base = { styles: { fontSize: 6.4, cellPadding: 0.7, halign: 'center', valign: 'middle', lineColor: [203, 213, 225], lineWidth: 0.1, overflow: 'linebreak' }, headStyles: { fillColor: [0, 107, 42], textColor: 255, fontStyle: 'bold', fontSize: 6.2, halign: 'center' }, alternateRowStyles: {}, columnStyles: { 0: { halign: 'left', cellWidth: 36, fontSize: 6.8 } }, margin: { left: 8, right: 8 }, didParseCell: colorCells };
+      const base = { styles: { fontSize: 6.4, cellPadding: 0.7, halign: 'center', valign: 'middle', lineColor: [203, 213, 225], lineWidth: 0.1, overflow: 'linebreak' }, headStyles: { fillColor: [0, 107, 42], textColor: 255, fontStyle: 'bold', fontSize: 6.2, halign: 'center' }, alternateRowStyles: { fillColor: [244, 246, 249] }, columnStyles: { 0: { halign: 'left', cellWidth: 36, fontSize: 6.8 } }, margin: { left: 8, right: 8 }, didParseCell: colorCells };
       const body = s.config.employees.map((e) => {
         const emp = empMap.get(e) || { name: e, position: '' };
         const row = [emp.name + (emp.position ? '\n' + emp.position : '')];
@@ -594,7 +622,15 @@
         title: 'JADWAL MASUK — ' + u.periodLabel(s.period).toUpperCase(),
         subtitle: UNITS[s.unit] + ' · ' + s.config.employees.length + ' karyawan' + (s.version ? ' · versi ' + s.version : '') + (s.dirty ? ' · BELUM DISIMPAN' : ''),
         sections: [
-          { head: ['Karyawan'].concat(dayHead, ['Masuk', 'Libur']), body, tableOpts: base },
+          {
+            body,
+            tableOpts: Object.assign({}, base, {
+              head: [
+                [{ content: 'Karyawan', rowSpan: 2, styles: { valign: 'bottom', halign: 'left' } }].concat(weeksOf(s.period).map((w) => ({ content: (w.to - w.from + 1 <= 2 ? 'Mg ' : 'Minggu ') + w.no, colSpan: w.to - w.from + 1, styles: { fillColor: w.no % 2 ? [0, 107, 42] : [0, 84, 33] } })), [{ content: 'Masuk', rowSpan: 2 }, { content: 'Libur', rowSpan: 2 }]),
+                dayHead
+              ]
+            })
+          },
           { title: 'Jumlah petugas per hari (terisi/ideal)', head: ['Shift'].concat(dayHead, ['', '']), body: counts, tableOpts: base },
           { title: 'Keterangan', head: ['Kode', 'Nama shift', 'Jam', 'Lama (jam)', 'Ideal / minimal'], body: s.config.shifts.map((sh) => [sh.code, sh.name, sh.start + '–' + sh.end, hours(sh), sh.min === undefined || sh.min === null ? 'sesuai kebutuhan' : 'minimal ' + sh.min + ' bila ada yang libur']).concat([[OFF, 'Libur', '', '', '']]), tableOpts: { styles: { fontSize: 7.5, cellPadding: 1.2 }, tableWidth: 160, margin: { left: 8 } } }
         ],
@@ -638,7 +674,7 @@
   /* =============================== Halaman =============================== */
   // Isian yang belum disimpan tetap ada selama aplikasi terbuka (per bulan & unit).
   const drafts = new Map();
-  const st = { period: null, unit: 'ALL', tab: 'grid', brush: null, mode: 'fair', keepManual: true };
+  const st = { period: null, unit: 'ALL', tab: 'grid', brush: null, mode: 'fair', keepManual: true, manualOffWeek: true };
 
   async function render(view, params) {
     const ui = NP.ui;
@@ -728,7 +764,7 @@
       for (let d = 1; d <= N; d++) {
         const w = weekday(s.period, d);
         const b = r.byDay[d];
-        head.push(`<th class="sch-d ${w === 0 ? 'sun' : ''} ${b.closed ? 'closed' : ''} ${b.custom ? 'custom' : ''}" title="${WEEKDAYS[w]}, ${d}${b.closed ? ' — tutup' : ''}"><span>${d}</span><small>${WD3[w]}</small></th>`);
+        head.push(`<th class="sch-d ${w === 0 ? 'sun' : ''} ${weekEdge(s.period, d) ? 'wk' : ''} ${b.closed ? 'closed' : ''} ${b.custom ? 'custom' : ''}" title="${WEEKDAYS[w]}, ${d}${b.closed ? ' — tutup' : ''}"><span>${d}</span><small>${WD3[w]}</small></th>`);
       }
       const rows = emps.map((e) => {
         const emp = empMap.get(e) || { name: e + ' (tidak ditemukan)', position: '' };
@@ -740,9 +776,15 @@
           const sh = shiftOf(s, v);
           const man = !!((s.config.manual[e] || {})[d]);
           const closed = r.byDay[d].closed;
-          cells.push(`<td class="sch-c ${v === OFF ? 'off' : ''} ${closed ? 'closed' : ''} ${bad.has(d) ? 'bad' : ''}"><button type="button" data-e="${u.esc(e)}" data-d="${d}" ${sh ? `style="--sc:${u.esc(sh.color)}"` : ''} class="${sh ? 'on' : ''} ${man ? 'man' : ''}" title="${u.esc(emp.name)} · ${d} ${WD3[weekday(s.period, d)]}${sh ? ' · ' + u.esc(sh.name) + ' ' + sh.start + '–' + sh.end : v === OFF ? ' · Libur' : ''}${man ? ' · diisi manual' : ''}${bad.has(d) ? ' · ' + u.esc(bad.get(d)) : ''}" ${canEdit ? '' : 'disabled'}>${u.esc(v)}</button></td>`);
+          cells.push(`<td class="sch-c ${v === OFF ? 'off' : ''} ${weekEdge(s.period, d) ? 'wk' : ''} ${closed ? 'closed' : ''} ${bad.has(d) ? 'bad' : ''}"><button type="button" data-e="${u.esc(e)}" data-d="${d}" ${sh ? `style="--sc:${u.esc(sh.color)}"` : ''} class="${sh ? 'on' : ''} ${man ? 'man' : ''}" title="${u.esc(emp.name)} · ${d} ${WD3[weekday(s.period, d)]}${sh ? ' · ' + u.esc(sh.name) + ' ' + sh.start + '–' + sh.end : v === OFF ? ' · Libur' : ''}${man ? ' · diisi manual' : ''}${bad.has(d) ? ' · ' + u.esc(bad.get(d)) : ''}" ${canEdit ? '' : 'disabled'}>${u.esc(v)}</button></td>`);
         }
-        return `<tr><th class="sch-name" scope="row"><b>${u.esc(emp.name)}</b><small>${u.esc(emp.position || '')}</small></th>${cells.join('')}
+        const perWeek = weeksOf(s.period).map((w) => {
+          const v = [];
+          for (let d = w.from; d <= w.to; d++) v.push((s.assignments[e] || {})[d]);
+          const sh = s.config.shifts.map((x) => v.filter((c) => c === x.code).length + x.code).join(' ');
+          return 'Mg ' + w.no + ': ' + sh + ' ' + v.filter((c) => c === OFF).length + 'L';
+        });
+        return `<tr><th class="sch-name" scope="row" title="${u.esc(perWeek.join('\n'))}"><b>${u.esc(emp.name)}</b><small>${u.esc(emp.position || '')}</small></th>${cells.join('')}
           <td class="sch-tot"><b>${x.work}</b></td><td class="sch-tot">${x.off}</td><td class="sch-tot">${u.num(Math.round(x.hours))}</td></tr>`;
       });
       const foot = s.config.shifts.map((sh) => {
@@ -750,7 +792,7 @@
         for (let d = 1; d <= N; d++) {
           const b = r.byDay[d];
           const n = b.count[sh.code] || 0;
-          c.push(`<td class="sch-f ${b.closed ? 'closed' : b.short[sh.code] ? 'short' : b.under[sh.code] ? 'under' : ''}" title="${sh.name} tanggal ${d}: ${n} orang · ideal ${b.closed ? 'tutup' : b.need[sh.code]}${!b.closed && b.min[sh.code] < b.need[sh.code] ? ', minimal ' + b.min[sh.code] : ''}">${b.closed ? '–' : n + '/' + b.need[sh.code]}</td>`);
+          c.push(`<td class="sch-f ${weekEdge(s.period, d) ? 'wk' : ''} ${b.closed ? 'closed' : b.short[sh.code] ? 'short' : b.under[sh.code] ? 'under' : ''}" title="${sh.name} tanggal ${d}: ${n} orang · ideal ${b.closed ? 'tutup' : b.need[sh.code]}${!b.closed && b.min[sh.code] < b.need[sh.code] ? ', minimal ' + b.min[sh.code] : ''}">${b.closed ? '–' : n + '/' + b.need[sh.code]}</td>`);
         }
         return `<tr><th class="sch-name" scope="row"><span class="sch-key" style="--sc:${u.esc(sh.color)}">${u.esc(sh.code)}</span> ${u.esc(sh.name)}</th>${c.join('')}<td colspan="3"></td></tr>`;
       });
@@ -772,11 +814,12 @@
             <div class="sch-gen">
               <label class="field-inline">Cara <select id="sc-mode">${ui.options([['fair', 'Merata (adil)'], ['random', 'Acak penuh']], st.mode)}</select></label>
               <label class="check"><input type="checkbox" id="sc-keep" ${st.keepManual ? 'checked' : ''}><span>Pertahankan isian manual</span></label>
+              <label class="check" title="Bila Anda menandai libur (L) secara manual, karyawan itu tidak diberi libur acak lagi pada minggu yang sama"><input type="checkbox" id="sc-offweek" ${st.manualOffWeek ? 'checked' : ''} ${st.keepManual ? '' : 'disabled'}><span>Libur manual menggantikan libur acak (minggu itu)</span></label>
               <button type="button" class="btn btn-ghost btn-sm" data-act="clear">${ui.icon('trash')}<span>Kosongkan jadwal</span></button>
             </div>
           </div>
           <p class="muted small">Sel bertitik = diisi manual (dipertahankan saat <b>Buat jadwal acak</b> bila dicentang). Sel merah melanggar ketentuan karyawan. Angka bawah = terisi/ideal per shift: <span class="txt-warn">oranye</span> di bawah ideal tetapi masih memenuhi minimal, <span class="txt-danger">merah</span> di bawah minimal.</p>` : ''}
-          <div class="sch-wrap"><table class="sch-grid"><thead><tr><th class="sch-name">Karyawan</th>${head.join('')}<th class="sch-tot" title="Hari masuk">Masuk</th><th class="sch-tot" title="Hari libur">Libur</th><th class="sch-tot" title="Total jam">Jam</th></tr></thead>
+          <div class="sch-wrap"><table class="sch-grid"><thead><tr class="sch-wkrow"><th class="sch-name" rowspan="2">Karyawan</th>${weeksOf(s.period).map((w) => `<th class="sch-wk ${w.no % 2 ? '' : 'alt'} ${w.from > 1 ? 'wk' : ''}" colspan="${w.to - w.from + 1}" title="Minggu ${w.no}: tanggal ${w.from}–${w.to}">${w.to - w.from + 1 <= 2 ? 'Mg ' + w.no : 'Minggu ' + w.no + `<small>${w.from}–${w.to}</small>`}</th>`).join('')}<th class="sch-tot" rowspan="2" title="Hari masuk">Masuk</th><th class="sch-tot" rowspan="2" title="Hari libur">Libur</th><th class="sch-tot" rowspan="2" title="Total jam">Jam</th></tr><tr class="sch-dayrow">${head.join('')}</tr></thead>
             <tbody>${rows.join('')}</tbody><tfoot>${foot.join('')}</tfoot></table></div>
           ${shortList.length || issueList.length ? `<div class="sch-notes">
             ${shortList.length ? `<div class="alert alert-warning">${ui.icon('warn')}<div><b>Di bawah jumlah minimal (${shortList.length})</b><ul>${shortList.slice(0, 8).map((x) => `<li>${x}</li>`).join('')}</ul>${shortList.length > 8 ? `<small>dan ${shortList.length - 8} lainnya</small>` : ''}<small class="block">Tambah karyawan, longgarkan ketentuan, atau kurangi kebutuhan pada tab <b>Shift &amp; kebutuhan per hari</b>.</small></div></div>` : ''}
@@ -834,7 +877,7 @@
               <label class="sch-line"><span class="sch-lbl">Masuk paling banyak</span><span class="sch-val">${num('maxMonth', r.maxMonth, 31, 'Masuk paling banyak per bulan')}<span>hari dalam sebulan</span></span></label>
               <label class="sch-line"><span class="sch-lbl">Tidak bisa masuk tanggal</span><span class="sch-val"><input data-ru value="${u.esc(fmtDays(r.unavailable))}" placeholder="mis. 3, 10-12" ${dis} aria-label="Tanggal tidak bisa masuk"></span></label>
             </div>
-            <div class="sch-sum"><span>${ui.icon('info')} <b>Ringkasan:</b> ${u.esc(describeRule(s, r))}</span>${canEdit && s.config.employees.length > 1 ? `<button type="button" class="btn btn-ghost btn-sm" data-copyrule>${ui.icon('copy')}<span>Salin ke semua karyawan terpilih</span></button>` : ''}</div>
+            <div class="sch-sum"><span>${ui.icon('info')} <b>Ringkasan:</b> ${u.esc(describeRule(s, r))}</span>${canEdit && s.config.employees.length > 1 ? `<button type="button" class="btn btn-ghost btn-sm" data-copyrule>${ui.icon('copy')}<span>Salin ketentuan ke…</span></button>` : ''}</div>
             ${h.length ? `<div class="sch-hint">${ui.icon('warn')}<div>${h.map(u.esc).join('<br>')}</div></div>` : ''}
           </div>` : ''}
         </div>`;
@@ -855,7 +898,7 @@
               <li><b>Cuti tanggal 10 sampai 12</b> → isi <i>Tidak bisa masuk tanggal</i> = 10-12.</li>
               <li><b>Siang cukup 1 orang bila ada yang libur</b> → di tab <i>Shift &amp; kebutuhan per hari</i>, isi kolom <i>Minimal bila ada yang libur</i> untuk Siang = 1.</li>
             </ul>
-            <p class="muted small">Gunakan <b>Salin ke semua karyawan terpilih</b> agar ketentuan yang sama berlaku untuk semua (tanggal tidak bisa masuk tidak ikut disalin).</p>
+            <p class="muted small">Gunakan <b>Salin ketentuan ke…</b> lalu pilih karyawan tujuan agar ketentuan yang sama berlaku untuk mereka (tanggal tidak bisa masuk tidak ikut disalin).</p>
           </details>
           ${list.length ? `<div class="sch-plist">${list.map(row).join('')}</div>` : ui.empty('Tidak ada karyawan aktif pada unit ini.', 'users')}
         </div>`;
@@ -1004,15 +1047,43 @@
       if (cp) {
         const src = cp.closest('[data-emp]').dataset.emp;
         const others = s.config.employees.filter((e) => e !== src);
-        const name = (empMap.get(src) || {}).name || src;
-        ui.confirm({ title: 'Salin ketentuan', html: `Terapkan ketentuan <b>${u.esc(name)}</b> (${u.esc(describeRule(s, ruleOf(s, src)))}) ke <b>${others.length} karyawan</b> lain di jadwal ini?<br><small>Tanggal tidak bisa masuk milik masing-masing karyawan tetap.</small>`, okLabel: 'Salin ketentuan' }).then((ok) => {
-          if (!ok) return;
-          const base = clone(s.config.rules[src] || {});
-          delete base.unavailable;
-          for (const e of others) s.config.rules[e] = Object.assign(clone(base), { unavailable: ((s.config.rules[e] || {}).unavailable || []).slice() });
-          markDirty();
-          rerender(drawPeople);
-          ui.toast('Ketentuan disalin ke ' + others.length + ' karyawan.');
+        const nm = (e) => (empMap.get(e) || {}).name || e;
+        const m = ui.modal({
+          title: 'Salin ketentuan',
+          size: 'md',
+          body: `<p>Salin ketentuan <b>${u.esc(nm(src))}</b>:</p>
+            <p class="sch-sum">${u.esc(describeRule(s, ruleOf(s, src)))}</p>
+            <p class="muted small">Pilih karyawan tujuan. Tanggal tidak bisa masuk milik masing-masing karyawan tidak ikut diubah.</p>
+            <label class="check"><input type="checkbox" id="cp-all"><span><b>Pilih semua</b></span></label>
+            <div class="sch-cplist">${others.map((e) => `<label class="check"><input type="checkbox" data-cpto="${u.esc(e)}"><span>${u.esc(nm(e))}<small class="block muted">${u.esc((empMap.get(e) || {}).position || '')} · ${u.esc(describeRule(s, ruleOf(s, e)))}</small></span></label>`).join('')}</div>
+            <div class="form-error" hidden></div>`,
+          actions: [
+            { label: 'Batal', cls: 'btn-ghost', onClick: (mm) => mm.close() },
+            {
+              label: 'Salin ketentuan', cls: 'btn-primary', icon: 'copy', onClick: (mm) => {
+                const to = [...mm.el.querySelectorAll('[data-cpto]:checked')].map((x) => x.dataset.cpto);
+                if (!to.length) {
+                  const er = mm.el.querySelector('.form-error');
+                  er.hidden = false;
+                  er.textContent = 'Pilih minimal satu karyawan tujuan.';
+                  return;
+                }
+                const base = clone(s.config.rules[src] || {});
+                delete base.unavailable;
+                for (const e of to) s.config.rules[e] = Object.assign(clone(base), { unavailable: ((s.config.rules[e] || {}).unavailable || []).slice() });
+                mm.close();
+                markDirty();
+                rerender(drawPeople);
+                ui.toast('Ketentuan ' + nm(src) + ' disalin ke ' + to.length + ' karyawan: ' + to.map(nm).join(', ') + '.');
+              }
+            }
+          ]
+        });
+        m.el.querySelector('#cp-all').onchange = (x) => m.el.querySelectorAll('[data-cpto]').forEach((c) => (c.checked = x.target.checked));
+        m.el.addEventListener('change', (x) => {
+          if (!x.target.dataset.cpto) return;
+          const all = [...m.el.querySelectorAll('[data-cpto]')];
+          m.el.querySelector('#cp-all').checked = all.every((c) => c.checked);
         });
         return;
       }
@@ -1150,7 +1221,12 @@
         return rerender(drawNeeds);
       }
       if (t.id === 'sc-mode') st.mode = t.value;
-      if (t.id === 'sc-keep') st.keepManual = t.checked;
+      if (t.id === 'sc-keep') {
+        st.keepManual = t.checked;
+        const o = body.querySelector('#sc-offweek');
+        if (o) o.disabled = !t.checked;
+      }
+      if (t.id === 'sc-offweek') st.manualOffWeek = t.checked;
     });
 
     /* ----------------------------- Toolbar ----------------------------- */
@@ -1191,7 +1267,7 @@
         }
         const hasFill = Object.values(s.assignments).some((c) => Object.keys(c).length);
         if (hasFill && !(await ui.confirm({ title: 'Buat jadwal acak', message: 'Isian jadwal ' + u.periodLabel(s.period) + ' akan diganti' + (st.keepManual ? ' (isian manual dipertahankan)' : ' seluruhnya') + '. Lanjutkan?', okLabel: 'Buat jadwal' }))) return;
-        const g = generate(s, { mode: st.mode, keepManual: st.keepManual, seed: (Date.now() ^ Math.floor(Math.random() * 1e9)) >>> 0 });
+        const g = generate(s, { mode: st.mode, keepManual: st.keepManual, manualOffWeek: st.manualOffWeek, seed: (Date.now() ^ Math.floor(Math.random() * 1e9)) >>> 0 });
         s.assignments = g.assignments;
         if (!st.keepManual) s.config.manual = {};
         markDirty();
@@ -1224,18 +1300,18 @@
     const set = (NP.state && NP.state.settings) || {};
     const company = (set.company && set.company.name) || 'Noura';
     const head = [];
-    for (let d = 1; d <= N; d++) head.push(`<th class="${weekday(s.period, d) === 0 ? 'sun' : ''}">${d}<br><small>${WD3[weekday(s.period, d)]}</small></th>`);
+    for (let d = 1; d <= N; d++) head.push(`<th class="${weekday(s.period, d) === 0 ? 'sun' : ''} ${weekEdge(s.period, d) ? 'wk' : ''}">${d}<br><small>${WD3[weekday(s.period, d)]}</small></th>`);
     const rows = s.config.employees.map((e) => {
       const emp = empMap.get(e) || { name: e, position: '' };
       const c = [];
       for (let d = 1; d <= N; d++) {
         const v = (s.assignments[e] || {})[d] || '';
         const sh = shiftOf(s, v);
-        c.push(`<td class="${v === OFF ? 'off' : ''} ${weekday(s.period, d) === 0 ? 'sun' : ''}" ${sh ? `style="background:${u.esc(sh.color)}22"` : ''}>${u.esc(v)}</td>`);
+        c.push(`<td class="${v === OFF ? 'off' : ''} ${weekday(s.period, d) === 0 ? 'sun' : ''} ${weekEdge(s.period, d) ? 'wk' : ''}" ${sh ? `style="background:${u.esc(sh.color)}22"` : ''}>${u.esc(v)}</td>`);
       }
       return `<tr><td class="nm"><b>${u.esc(emp.name)}</b><br><small>${u.esc(emp.position || '')}</small></td>${c.join('')}<td>${r.byEmp[e].work}</td><td>${r.byEmp[e].off}</td></tr>`;
     });
-    return `<style>@page{size:A4 landscape;margin:8mm}.sch-print{font-family:Arial,Helvetica,sans-serif;color:#111;font-size:9px}.sch-print h1{font-size:15px;margin:0 0 2px}.sch-print p{margin:0 0 6px;color:#444}.sch-print table{border-collapse:collapse;width:100%}.sch-print th,.sch-print td{border:1px solid #bbb;padding:2px 1px;text-align:center}.sch-print td.nm{text-align:left;white-space:nowrap;padding:2px 4px}.sch-print .off{color:#888}.sch-print .sun{background:#fef2f2}.sch-print .lg{margin-top:6px}.sch-print .lg span{margin-right:12px}</style>
+    return `<style>@page{size:A4 landscape;margin:8mm}.sch-print{font-family:Arial,Helvetica,sans-serif;color:#111;font-size:9px}.sch-print h1{font-size:15px;margin:0 0 2px}.sch-print p{margin:0 0 6px;color:#444}.sch-print table{border-collapse:collapse;width:100%}.sch-print th,.sch-print td{border:1px solid #bbb;padding:2px 1px;text-align:center}.sch-print td.nm{text-align:left;white-space:nowrap;padding:2px 4px}.sch-print .off{color:#888}.sch-print .sun{background:#fef2f2}.sch-print .wk{border-left:2px solid #006b2a}.sch-print tbody tr{border-bottom:2px solid #94a3b8}.sch-print tbody tr td{border-bottom:1.5px solid #94a3b8}.sch-print tbody tr:nth-child(even) td.nm{background:#f1f5f9}.sch-print .lg{margin-top:6px}.sch-print .lg span{margin-right:12px}</style>
       <div class="sch-print"><h1>Jadwal Masuk — ${u.esc(company)}</h1><p>${u.esc(UNITS[s.unit])} · ${u.esc(u.periodLabel(s.period))}${s.version ? ' · versi ' + s.version : ''}</p>
       <table><thead><tr><th>Karyawan</th>${head.join('')}<th>Masuk</th><th>Libur</th></tr></thead><tbody>${rows.join('')}</tbody></table>
       <div class="lg">${s.config.shifts.map((sh) => `<span><b>${u.esc(sh.code)}</b> = ${u.esc(sh.name)} (${sh.start}–${sh.end})</span>`).join('')}<span><b>L</b> = Libur</span></div></div>`;

@@ -1178,6 +1178,17 @@ async function step(name, fn) {
     await page.click('[data-brush="L"]');
     await page.click(`.sch-c button[data-e="${ids[2]}"][data-d="3"]`);
     await page.waitForFunction((e) => { const b = document.querySelector(`.sch-c button[data-e="${e}"][data-d="3"]`); return b && b.textContent === 'L' && b.classList.contains('man'); }, ids[2]);
+    // buat ulang: libur manual menggantikan libur acak di minggu itu (2–8 Feb), isian manual tetap
+    let oldGrid = await page.$('.sch-grid');
+    await page.click('[data-act=random]');
+    await modalBtn('Buat jadwal').click();
+    await page.waitForFunction((el) => !el.isConnected && document.querySelector('.sch-grid'), oldGrid);
+    const wk = await ev((e) => [2, 3, 4, 5, 6, 7, 8].map((d) => document.querySelector(`.sch-c button[data-e="${e}"][data-d="${d}"]`).textContent).join(''), ids[2]);
+    assert.ok(wk[1] === 'L' && wk.split('L').length - 1 === 1, 'minggu 2–8 hanya libur manual: ' + wk);
+    assert.strictEqual(wk[0], 'P', 'tetap Pagi setiap Senin');
+    // garis batas minggu & judul minggu
+    assert.ok(await page.locator('.sch-grid thead .sch-wk').count() >= 4);
+    assert.ok(await page.locator('.sch-grid thead th.sch-d.wk').count() >= 3);
     await newToast(() => page.click('[data-act=save]'), /disimpan \(versi 1\)/);
     // muat ulang dari database
     await go('dashboard');
@@ -1195,6 +1206,20 @@ async function step(name, fn) {
     assert.strictEqual(x.name, 'jadwal-masuk-2026-02-klinik.xlsx');
     const pdf = await download(() => page.click('.page-head [data-act=pdf]'));
     assert.ok(pdf.name === 'jadwal-masuk-2026-02-klinik.pdf' && pdf.size > 10000, pdf.name + ' ' + pdf.size);
+    // salin ketentuan ke karyawan yang dipilih saja
+    await page.click('[data-tab=people]');
+    await page.waitForSelector('.sch-plist');
+    await page.click(`.sch-p[data-emp="${ids[0]}"] [data-copyrule]`);
+    await page.waitForSelector('.sch-cplist');
+    assert.strictEqual(await page.locator('.sch-cplist [data-cpto]').count(), 3);
+    await page.check(`.sch-cplist [data-cpto="${ids[1]}"]`);
+    const oldP = await page.$('.sch-plist');
+    await modalBtn('Salin ketentuan').click();
+    await page.waitForFunction((el) => !el.isConnected, oldP);
+    const sums = await ev((ids) => ids.map((e) => document.querySelector(`.sch-p[data-emp="${e}"] .sch-sum`).textContent), ids);
+    assert.ok(/libur tiap Minggu/.test(sums[1]) && /prioritas Pagi/.test(sums[1]), sums[1]);
+    assert.ok(!/libur tiap Minggu/.test(sums[2]) && !/libur tiap Minggu/.test(sums[3]), 'karyawan lain tidak berubah');
+    await newToast(() => page.click('[data-act=save]'), /disimpan \(versi 2\)/);
   });
   await step('tombol Muat ulang: halaman dimuat ulang, tetap login di halaman yang sama; jadwal belum disimpan → konfirmasi', async () => {
     await go('analysis');
@@ -1222,7 +1247,7 @@ async function step(name, fn) {
     })()]);
     await page.waitForSelector('#view.page-schedule .page-host');
     await page.waitForSelector('.sch-grid');
-    assert.ok(/Tersimpan · versi 1/.test(await page.locator('#sc-state').innerText()), 'perubahan yang belum disimpan dibuang');
+    assert.ok(/Tersimpan · versi 2/.test(await page.locator('#sc-state').innerText()), 'perubahan yang belum disimpan dibuang');
   });
   await step('Data Karyawan: tombol Tambah Dokter & Tambah Bidan mengisi jabatan, unit & skema', async () => {
     await go('employees');

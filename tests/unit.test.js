@@ -750,6 +750,19 @@ console.log('Jadwal masuk');
     assert.ok(hit > 20, 'D masuk Pagi pada hari ada yang libur: ' + hit);
     assert.ok(/prioritas Pagi bila ada yang libur/.test(S.describeRule(s, S.ruleOf(s, 'D'))));
   });
+  test('libur manual menggantikan libur acak pada minggu itu', () => {
+    const s = mk({});
+    s.assignments = { A: { 3: 'L' } };
+    s.config.manual = { A: { 3: true } };
+    const g = S.generate(s, { seed: 8 });
+    const wk = [2, 3, 4, 5, 6, 7, 8].map((d) => g.assignments.A[d]);
+    assert.strictEqual(wk.filter((v) => v === 'L').length, 1, 'hanya libur manual: ' + wk.join(''));
+    assert.strictEqual(g.assignments.A[3], 'L');
+    s.assignments = g.assignments;
+    assert.strictEqual(S.check(s).issues, 0);
+    const g2 = S.generate(Object.assign(mk({}), { assignments: { A: { 3: 'L' } }, config: Object.assign(mk({}).config, { manual: { A: { 3: true } } }) }), { seed: 8, manualOffWeek: false });
+    assert.ok([2, 4, 5, 6, 7, 8].some((d) => g2.assignments.A[d] === 'L'), 'tanpa opsi: libur acak tetap ada');
+  });
   test('validasi sebelum simpan: kode shift, tanggal di luar bulan, karyawan di luar jadwal', () => {
     const s = mk();
     assert.deepStrictEqual(S.validate(s), []);
