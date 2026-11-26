@@ -1177,6 +1177,34 @@ async function step(name, fn) {
     const x = await download(() => page.click('.page-head [data-act=xls]'));
     assert.strictEqual(x.name, 'jadwal-masuk-2026-02-klinik.xlsx');
   });
+  await step('tombol Muat ulang: halaman dimuat ulang, tetap login di halaman yang sama; jadwal belum disimpan → konfirmasi', async () => {
+    await go('analysis');
+    await ev(() => (window.__marker = 1));
+    await Promise.all([page.waitForEvent('load'), page.click('#reload-btn')]);
+    await page.waitForSelector('#view.page-analysis .page-host');
+    assert.strictEqual(await ev(() => window.__marker), undefined, 'halaman benar-benar dimuat ulang');
+    assert.ok(await page.locator('.sidebar').count(), 'tetap login');
+    // perubahan jadwal belum disimpan → konfirmasi; Batal tidak memuat ulang
+    await go('schedule?month=2026-02&unit=KLINIK&tab=grid');
+    await page.waitForSelector('.sch-grid');
+    await page.click('[data-brush="L"]');
+    await page.click('.sch-c button[data-d="20"] >> nth=0');
+    await page.waitForSelector('.sch-dirty');
+    await ev(() => (window.__marker = 2));
+    await page.click('#reload-btn');
+    await page.waitForSelector('.modal-backdrop');
+    assert.ok(/belum disimpan/.test(await page.locator('.modal-body').innerText()));
+    await modalBtn('Batal').click();
+    await page.waitForTimeout(300);
+    assert.strictEqual(await ev(() => window.__marker), 2);
+    await Promise.all([page.waitForEvent('load'), (async () => {
+      await page.click('#reload-btn');
+      await modalBtn('Muat ulang').click();
+    })()]);
+    await page.waitForSelector('#view.page-schedule .page-host');
+    await page.waitForSelector('.sch-grid');
+    assert.ok(/Tersimpan · versi 1/.test(await page.locator('#sc-state').innerText()), 'perubahan yang belum disimpan dibuang');
+  });
   await step('Data Karyawan: tombol Tambah Dokter & Tambah Bidan mengisi jabatan, unit & skema', async () => {
     await go('employees');
     await page.click('[data-act=add-dokter]');

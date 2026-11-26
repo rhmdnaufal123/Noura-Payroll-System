@@ -1072,6 +1072,9 @@
       <div class="lg">${s.config.shifts.map((sh) => `<span><b>${u.esc(sh.code)}</b> = ${u.esc(sh.name)} (${sh.start}–${sh.end})</span>`).join('')}<span><b>L</b> = Libur</span></div></div>`;
   }
 
+  /** Ada jadwal yang diubah tetapi belum disimpan (dipakai tombol Muat ulang). */
+  sched.hasUnsaved = () => [...drafts.values()].some((x) => x.dirty);
+
   NP.pages = NP.pages || {};
   NP.pages.schedule = { title: 'Jadwal Masuk', render };
   if (typeof module !== 'undefined' && module.exports) module.exports = NP;
