@@ -1102,6 +1102,65 @@ async function step(name, fn) {
     await page.click('[data-act=sel-clear]');
     await page.fill('#h-q', '');
   });
+  await step('jadwal masuk: pilih karyawan & ketentuan, custom per hari, buat acak, isi manual, simpan & muat ulang, Excel', async () => {
+    await go('schedule?month=2026-02&unit=KLINIK&tab=people');
+    await page.waitForSelector('.sch-plist');
+    const ids = await page.locator('.sch-p').evaluateAll((els) => els.slice(0, 4).map((e) => e.dataset.emp));
+    assert.strictEqual(ids.length, 4);
+    for (const id of ids) {
+      const old = await page.$('.sch-plist');
+      await page.check(`[data-inc="${id}"]`);
+      await page.waitForFunction((el) => !el.isConnected, old);
+    }
+    // ketentuan: karyawan 1 libur tetap Minggu, karyawan 2 hanya shift Pagi
+    await page.locator(`.sch-p[data-emp="${ids[0]}"] label:has([data-ro="0"]) span`).click();
+    await page.locator(`.sch-p[data-emp="${ids[1]}"] label:has([data-rs="S"]) span`).click();
+    // custom per hari: tanggal 14 butuh 2 Pagi, tanggal 15 tutup
+    await page.click('[data-tab=needs]');
+    await page.waitForSelector('.sch-days');
+    let old = await page.$('.sch-days');
+    await page.fill('.sch-days tr[data-day="14"] [data-dn="P"]', '2');
+    await page.dispatchEvent('.sch-days tr[data-day="14"] [data-dn="P"]', 'change');
+    await page.waitForFunction((el) => !el.isConnected, old);
+    old = await page.$('.sch-days');
+    await page.check('.sch-days tr[data-day="15"] [data-dc]');
+    await page.waitForFunction((el) => !el.isConnected, old);
+    assert.ok(await page.locator('.sch-days tr[data-day="14"].sch-custom').count());
+    await page.click('[data-act=random]');
+    await page.waitForSelector('.sch-grid');
+    const grid = await ev((ids) => {
+      const cell = (e, d) => (document.querySelector(`.sch-c button[data-e="${e}"][data-d="${d}"]`) || {}).textContent;
+      const sundays = [1, 8, 15, 22];
+      return {
+        p14: ids.filter((e) => cell(e, 14) === 'P').length,
+        d15: ids.map((e) => cell(e, 15)),
+        sun0: sundays.map((d) => cell(ids[0], d)),
+        s1: [...Array(28)].map((_, i) => cell(ids[1], i + 1)).filter((v) => v === 'S').length,
+        bad: document.querySelectorAll('.sch-c.bad').length
+      };
+    }, ids);
+    assert.deepStrictEqual(grid, { p14: 2, d15: ['L', 'L', 'L', 'L'], sun0: ['L', 'L', 'L', 'L'], s1: 0, bad: 0 });
+    assert.ok(/Belum disimpan/.test(await page.locator('#sc-state').innerText()));
+    // isi manual: kuas Libur pada karyawan 3 tanggal 3
+    await page.click('[data-brush="L"]');
+    await page.click(`.sch-c button[data-e="${ids[2]}"][data-d="3"]`);
+    await page.waitForFunction((e) => { const b = document.querySelector(`.sch-c button[data-e="${e}"][data-d="3"]`); return b && b.textContent === 'L' && b.classList.contains('man'); }, ids[2]);
+    await newToast(() => page.click('[data-act=save]'), /disimpan \(versi 1\)/);
+    // muat ulang dari database
+    await go('dashboard');
+    await go('schedule?month=2026-02&unit=KLINIK&tab=grid');
+    await page.waitForSelector('.sch-grid');
+    assert.ok(/Tersimpan · versi 1/.test(await page.locator('#sc-state').innerText()));
+    const db = await ev(async () => {
+      const s = await NP.sched.get('2026-02', 'KLINIK');
+      return { n: s.config.employees.length, off: s.config.rules[s.config.employees[0]].offDays, day14: s.config.days[14], day15: s.config.days[15], filled: Object.values(s.assignments).reduce((a, c) => a + Object.keys(c).length, 0), man: s.config.manual };
+    });
+    assert.deepStrictEqual([db.n, db.off, db.day14, db.day15, db.filled], [4, [0], { need: { P: 2 } }, { need: {}, closed: true }, 4 * 28]);
+    assert.deepStrictEqual(db.man, { [ids[2]]: { 3: true } });
+    assert.ok(await ev(async () => (await NP.db.all('auditLog')).some((l) => l.action === 'schedule.save')));
+    const x = await download(() => page.click('.page-head [data-act=xls]'));
+    assert.strictEqual(x.name, 'jadwal-masuk-2026-02-klinik.xlsx');
+  });
   await step('Data Karyawan: tombol Tambah Dokter & Tambah Bidan mengisi jabatan, unit & skema', async () => {
     await go('employees');
     await page.click('[data-act=add-dokter]');
@@ -1190,7 +1249,12 @@ async function step(name, fn) {
     await page.waitForTimeout(400);
     assert.ok(/tidak memiliki hak akses/.test(await page.locator('#view').innerText()));
     const navs = await page.locator('.nav-item').count();
-    assert.ok(navs <= 4, navs);
+    assert.ok(navs <= 5, navs);
+    // jadwal masuk dapat dilihat viewer tetapi tidak dapat diubah
+    await go('schedule?month=2026-02&unit=KLINIK');
+    await page.waitForSelector('.sch-grid');
+    assert.strictEqual(await page.locator('[data-act=save], [data-act=random], [data-brush]').count(), 0);
+    assert.ok(await page.locator('.sch-c button').first().isDisabled());
   });
   await step('peran Operasional: rekening tersamar & tidak bisa membatalkan transaksi', async () => {
     await ev(() => sessionStorage.clear());
@@ -1210,7 +1274,7 @@ async function step(name, fn) {
   for (const [name, vp] of [['iPhone', { width: 390, height: 844 }], ['Android', { width: 412, height: 915 }], ['iPad', { width: 820, height: 1180 }], ['Laptop', { width: 1280, height: 800 }]]) {
     await step('tampilan ' + name + ' tanpa scroll horizontal halaman', async () => {
       await page.setViewportSize(vp);
-      for (const h of ['dashboard', 'input', 'transactions', 'bulk', 'analysis']) {
+      for (const h of ['dashboard', 'input', 'transactions', 'bulk', 'analysis', 'schedule?month=2026-02&unit=KLINIK&tab=grid', 'schedule?tab=people', 'schedule?tab=needs']) {
         await go(h);
         // grafik menyesuaikan ukuran secara asinkron setelah viewport berubah
         const ok = await page.waitForFunction(() => document.documentElement.scrollWidth - window.innerWidth <= 1, null, { timeout: 5000 }).then(() => true, () => false);

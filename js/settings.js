@@ -525,8 +525,8 @@
         if (!(await ui.confirm({ title: 'Hapus seluruh data operasional', message: 'SEMUA karyawan, tindakan, transaksi, dan penggajian akan dihapus permanen. Lanjutkan?', danger: true, okLabel: 'Hapus semua' }))) return;
         const auth = await NP.sec.authorize('Menghapus seluruh data operasional.', { noNote: true });
         if (!auth) return;
-        await NP.db.run(['employees', 'services', 'transactions', 'payrollRuns', 'worklogs', 'counters', 'auditLog', 'settings'], async (t) => {
-          for (const s of ['employees', 'services', 'transactions', 'payrollRuns', 'worklogs', 'counters']) await t.clear(s);
+        await NP.db.run(['employees', 'services', 'transactions', 'payrollRuns', 'worklogs', 'schedules', 'counters', 'auditLog', 'settings'], async (t) => {
+          for (const s of ['employees', 'services', 'transactions', 'payrollRuns', 'worklogs', 'schedules', 'counters']) await t.clear(s);
           const st = await t.get('settings', 'app');
           st.demoLoaded = false;
           st.demoRemoved = true;

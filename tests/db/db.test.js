@@ -590,6 +590,33 @@ const today = () => new Date(Date.now() + 7 * 3600000).toISOString().slice(0, 10
     assert.strictEqual(r.created.length, 1);
   });
 
+  console.log('Jadwal masuk');
+  await test('jadwal: simpan oleh ops/keuangan/admin, viewer ditolak, validasi kode & tanggal, kunci versi, audit', async () => {
+    const SH = [{ code: 'P', name: 'Pagi', start: '07:00', end: '14:00' }, { code: 'S', name: 'Siang', start: '14:00', end: '21:00' }];
+    const sched = (asg, extra) => JSON.stringify(Object.assign({ period: '2026-02', unit: 'KLINIK', title: 'Jadwal Februari', config: { shifts: SH, employees: [E.bidan, E.bidan2], weekly: {}, days: {}, rules: {} }, assignments: asg }, extra || {}));
+    await rejects(as(U.view, (c) => rpc(c, 'save_work_schedule', sched({}))), /Akses ditolak/);
+    const r1 = await as(U.ops, (c) => rpc(c, 'save_work_schedule', sched({ [E.bidan]: { 1: 'P', 2: 'L' }, [E.bidan2]: { 1: 'S' } })));
+    assert.deepStrictEqual([r1.id, r1.version], ['JDW-202602-KLINIK', 1]);
+    // kode shift tidak terdaftar, tanggal di luar bulan (Februari 28 hari), karyawan di luar jadwal
+    await rejects(as(U.ops, (c) => rpc(c, 'save_work_schedule', sched({ [E.bidan]: { 3: 'M' } }))), /bukan shift yang terdaftar/);
+    await rejects(as(U.ops, (c) => rpc(c, 'save_work_schedule', sched({ [E.bidan]: { 29: 'P' } }))), /di luar bulan/);
+    await rejects(as(U.ops, (c) => rpc(c, 'save_work_schedule', sched({ [E.kasir]: { 1: 'P' } }))), /tidak termasuk/);
+    await rejects(as(U.ops, (c) => rpc(c, 'save_work_schedule', JSON.stringify({ period: '2026-02', unit: 'KLINIK', config: { shifts: [{ code: 'L', start: '07:00', end: '14:00' }] } }))), /Kode shift/);
+    // kunci versi: penyimpanan dengan versi lama ditolak
+    const r2 = await as(U.fin, (c) => rpc(c, 'save_work_schedule', sched({ [E.bidan]: { 1: 'S' } }, { version: 1 })));
+    assert.strictEqual(r2.version, 2);
+    await rejects(as(U.admin, (c) => rpc(c, 'save_work_schedule', sched({ [E.bidan]: { 1: 'P' } }, { version: 1 }))), /diubah oleh pengguna lain/);
+    // semua pengguna aktif dapat membaca; tulis langsung ke tabel ditolak
+    const rows = await as(U.view, (c) => c.query('select id, version, assignments from public.work_schedules').then((r) => r.rows));
+    assert.deepStrictEqual(rows, [{ id: 'JDW-202602-KLINIK', version: 2, assignments: { [E.bidan]: { 1: 'S' } } }]);
+    await rejects(as(U.admin, (c) => c.query("update public.work_schedules set title = 'x'")), /permission denied/);
+    const a = (await su("select count(*)::int n from public.audit_logs where action = 'schedule.save' and entity_id = 'JDW-202602-KLINIK'")).rows[0].n;
+    assert.strictEqual(a, 2);
+    await rejects(as(U.view, (c) => rpc(c, 'delete_work_schedule', 'JDW-202602-KLINIK')), /Akses ditolak/);
+    await as(U.ops, (c) => rpc(c, 'delete_work_schedule', 'JDW-202602-KLINIK'));
+    assert.strictEqual((await su('select count(*)::int n from public.work_schedules')).rows[0].n, 0);
+  });
+
   await pool.end();
   console.log('\n' + passed + ' lulus, ' + failures.length + ' gagal');
   process.exit(failures.length ? 1 : 0);
